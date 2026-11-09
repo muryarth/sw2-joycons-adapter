@@ -1,0 +1,31 @@
+#include <winver.h>
+#include "resource.h"
+
+IDI_APPICON ICON "../../assets/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    0,4,0,0
+ PRODUCTVERSION 0,4,0,0
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041604b0"
+        BEGIN
+            VALUE "FileDescription",  "SW2 Adapter - controles do Switch 2 no Windows"
+            VALUE "FileVersion",      "0.4.0"
+            VALUE "InternalName",     "sw2-joycons-adapter"
+            VALUE "OriginalFilename", "sw2-adapter.exe"
+            VALUE "ProductName",      "SW2 Adapter"
+            VALUE "ProductVersion",   "0.4.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x416, 1200
+    END
+END

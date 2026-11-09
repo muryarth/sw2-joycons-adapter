@@ -1,0 +1,7 @@
+build/
+out/
+build.log
+*.user
+.vs/
+.vscode/
+.claude/

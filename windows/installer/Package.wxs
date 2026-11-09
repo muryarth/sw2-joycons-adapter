@@ -1,0 +1,113 @@
+<!--
+  SW2 Adapter MSI (WiX Toolset 5). Build with windows/installer/build.ps1.
+
+  - Per-machine install, folder chosen by the user (default: Program Files\SW2 Adapter)
+  - Start menu shortcut, always (makes the app findable from Windows search)
+  - Optional desktop shortcut (checkbox, page after the folder page)
+  - Major upgrade: a newer MSI replaces the installed version in place;
+    installing an older one over a newer one is refused.
+
+  NEVER change UpgradeCode: it is how Windows recognises earlier versions.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="SW2 Adapter"
+           Manufacturer="Arthur Mury"
+           Version="$(Version)"
+           UpgradeCode="F6EB8F35-CBAE-49DE-926D-6C5F247A11F6"
+           Scope="perMachine"
+           Language="1033">
+
+    <SummaryInformation Description="SW2 Adapter $(Version) - Switch 2 controllers on Windows" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first if you really want this older version." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Add/Remove Programs entry -->
+    <Icon Id="AppIcon" SourceFile="$(AssetsDir)\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/muryarth/sw2-joycons-adapter" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/muryarth/sw2-joycons-adapter/issues" />
+
+    <!-- Remember the folder chosen at first install, so upgrades land in the same place -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\SW2 Adapter"
+                      Name="InstallFolder" Type="raw" />
+    </Property>
+
+    <!-- Desktop shortcut checkbox: on by default -->
+    <Property Id="DESKTOPSHORTCUT" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SW2 Adapter" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="SW2 Adapter" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainExe">
+        <File Id="AppExe" Source="$(BinDir)\sw2-adapter.exe" KeyPath="yes" />
+        <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="SW2 Adapter"
+                  Description="Switch 2 controllers on Windows"
+                  Target="[#AppExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="Muryarth.SW2Adapter" />
+        </Shortcut>
+        <RegistryValue Root="HKLM" Key="Software\SW2 Adapter" Name="InstallFolder"
+                       Type="string" Value="[INSTALLFOLDER]" />
+      </Component>
+
+      <Component Id="DesktopShortcut" Condition="DESKTOPSHORTCUT = 1">
+        <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="SW2 Adapter"
+                  Description="Switch 2 controllers on Windows"
+                  Target="[#AppExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="Muryarth.SW2Adapter" />
+        </Shortcut>
+        <RegistryValue Root="HKLM" Key="Software\SW2 Adapter" Name="DesktopShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="LicenseFile">
+        <File Id="LicenseTxt" Source="$(RepoDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- UI: Welcome → License → Folder → Shortcuts → Ready -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(ArtDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(ArtDir)\dialog.bmp" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <ui:WixUI Id="WixUI_InstallDir" />
+
+    <UI>
+      <Dialog Id="ShortcutDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where [ProductName] should appear." />
+        <Control Id="StartMenuInfo" Type="Text" X="20" Y="60" Width="330" Height="28" NoPrefix="yes" Text="A Start menu shortcut is always created, so you can find [ProductName] by typing its name in Windows search." />
+        <Control Id="DesktopCheck" Type="CheckBox" X="20" Y="96" Width="330" Height="17" Property="DESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Insert ShortcutDlg into the stock flow. A later NewDialog event on the
+           same control wins, so these override the stock InstallDir → Ready hops. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutDlg" Order="10"
+               Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutDlg" Order="10"
+               Condition="NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

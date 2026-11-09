@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>SW2 Adapter</title>
+  <!-- Tile -->
+  <rect width="256" height="256" rx="56" fill="#14161B"/>
+  <!-- TV -->
+  <rect x="42" y="58" width="152" height="100" rx="12" fill="none" stroke="#E8EAED" stroke-width="12"/>
+  <line x1="118" y1="170" x2="118" y2="190" stroke="#E8EAED" stroke-width="12"/>
+  <line x1="92" y1="196" x2="144" y2="196" stroke="#E8EAED" stroke-width="12" stroke-linecap="round"/>
+  <!-- Joy-Con in front of the TV (cut-out ring keeps it separate from the screen outline) -->
+  <rect x="158" y="94" width="72" height="132" rx="36" fill="#14161B"/>
+  <rect x="168" y="104" width="52" height="112" rx="26" fill="#FF5A5F"/>
+  <circle cx="194" cy="138" r="11" fill="#14161B"/>
+  <circle cx="194" cy="182" r="6" fill="#14161B"/>
+</svg>
