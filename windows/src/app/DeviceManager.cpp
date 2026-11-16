@@ -9,6 +9,7 @@
 #include <ViGEm/Client.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 
@@ -24,6 +25,7 @@ constexpr auto USB_CONFIRM_TIMEOUT = std::chrono::seconds(3);          // cable 
 constexpr auto CHARGER_LEAD = std::chrono::milliseconds(1500);          // charger lifts the voltage before Windows reports the cable
 constexpr auto BATTERY_SETTLE_AFTER_CHARGE = std::chrono::minutes(2);    // voltage relaxes after charging
 constexpr auto CHARGE_ROLLBACK = std::chrono::milliseconds(300);         // battery current reacts with the charger
+constexpr auto PAIR_GRACE = std::chrono::seconds(60);                  // background: keep listening after a connect (L+R pairs)
 constexpr int  RETRY_STEP_SECONDS = 3;                                // backoff grows per failure...
 constexpr int  RETRY_MAX_SECONDS  = 15;                               // ...up to this
 constexpr size_t LOG_MAX_LINES    = 300;
@@ -46,6 +48,19 @@ int PolicyIntervalUs(UpdatePolicy p) {
 }
 
 std::wstring LogFile() { return SettingsDirectory() + L"\\log.txt"; }
+
+// Advertisement RSSI jumps by ~10 dB from packet to packet: smooth it, and
+// change the bars only once the level is clearly past a threshold (3 dB), so
+// the indicator does not flicker while a controller waits in sync mode.
+constexpr float RSSI_SMOOTHING  = 0.1f;
+constexpr float RSSI_HYSTERESIS = 3.f;
+int RawSignalLevel(float rssi) { return rssi > -60.f ? 4 : rssi > -70.f ? 3 : rssi > -80.f ? 2 : 1; }
+int SignalLevel(float rssi, int current) {
+    if (current == 0) return RawSignalLevel(rssi);
+    if (const int up = RawSignalLevel(rssi - RSSI_HYSTERESIS); up > current) return up;
+    if (const int down = RawSignalLevel(rssi + RSSI_HYSTERESIS); down < current) return down;
+    return current;
+}
 
 bool IsVisible(TimePoint lastSeen, TimePoint now) {
     return lastSeen != TimePoint{} && now - lastSeen < VISIBLE_FOR;
@@ -152,7 +167,6 @@ void DeviceManager::ApplyRuntimeLocked() {
     SetLang(m_settings.language == 1 ? Lang::Pt : Lang::En);
     m_runtime.deadzone = m_settings.deadzone;
     m_runtime.swap     = m_settings.swapABXY;
-    m_runtime.gyro     = m_settings.gyroSource;
 
     VirtualPadManager::Settings vp;
     vp.minIntervalUs = PolicyIntervalUs(m_settings.updatePolicy);
@@ -222,6 +236,8 @@ std::string DeviceManager::NameLocked(uint64_t address, ControllerKind kind) con
 
 void DeviceManager::Tick(bool focused) {
     ScanProfile profile = ScanProfile::Off;
+    std::vector<uint64_t> idle;   // to disconnect after the lock is released
+    int idleMinutes = 0;
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_focused = focused;
@@ -237,7 +253,7 @@ void DeviceManager::Tick(bool focused) {
 
             const bool visible = IsVisible(d.lastSeen, now);
             const bool known = m_settings.Find(d.address) != nullptr;
-            if (!visible) d.wasVisible = false;
+            if (!visible) { d.wasVisible = false; d.rssiAvg = 0.f; d.signal = 0; }
             if (d.state == DeviceState::Available && !visible) {
                 if (!known && !d.inSession) { it = m_devices.erase(it); continue; }   // stopped advertising
                 if (known) d.state = DeviceState::Offline;
@@ -246,15 +262,46 @@ void DeviceManager::Tick(bool focused) {
         }
 
         const bool wantForeground = focused && (m_settings.autoSearch || now < m_manualSearchUntil);
-        if (wantForeground || missing)
+        if (wantForeground || missing || ListeningLocked())
             profile = anyConnected ? ScanProfile::Coexistence : ScanProfile::Fast;
+
+        // Idle auto-disconnect (not forget). The halves of a combined pair
+        // count as one controller: input on either keeps both connected.
+        idleMinutes = m_settings.idleDisconnectMin;
+        if (idleMinutes > 0 && !m_demo) {
+            const auto limit = std::chrono::minutes(idleMinutes);
+            for (const auto& [address, d] : m_devices) {
+                if (d->state != DeviceState::Connected || d->lastActivity == TimePoint{}) continue;
+                TimePoint last = d->lastActivity;
+                if (const auto s = d->slot) {
+                    for (uint64_t member : {s->left, s->right}) {
+                        if (!member || member == address) continue;
+                        if (auto m = m_devices.find(member); m != m_devices.end() && m->second->state == DeviceState::Connected)
+                            last = std::max(last, m->second->lastActivity);
+                    }
+                }
+                if (now - last >= limit) idle.push_back(address);
+            }
+        }
     }
     m_scanner.Apply(profile);
+    for (uint64_t address : idle) Disconnect(address, idleMinutes);
 }
 
 void DeviceManager::SearchNow(int seconds) {
     std::lock_guard<std::mutex> lk(m_mutex);
     m_manualSearchUntil = Clock::now() + std::chrono::seconds(seconds);
+}
+
+// With nothing connected the app keeps listening, also in the background, so
+// pressing sync is enough to start playing. A short grace after a connection
+// lets the other half of a Joy-Con pair join.
+bool DeviceManager::ListeningLocked() const {
+    if (!m_settings.autoSearch) return false;
+    if (Clock::now() < m_listenGraceUntil) return true;
+    for (const auto& [address, d] : m_devices)
+        if (d->state == DeviceState::Connected || d->state == DeviceState::Connecting) return false;
+    return true;
 }
 
 bool DeviceManager::Searching() const {
@@ -284,7 +331,11 @@ void DeviceManager::OnAdvertisement(uint64_t address, const AdvertisementInfo& i
     const std::shared_ptr<Device> d = entry;
     if (d->kind == ControllerKind::Unknown) d->kind = info.kind;
     d->lastSeen = now;
-    d->rssi = rssi;
+    if (rssi < 0 && rssi > -127) {   // 0 / -127: no reading
+        d->rssiAvg = d->rssiAvg < 0.f ? d->rssiAvg + (rssi - d->rssiAvg) * RSSI_SMOOTHING : float(rssi);
+        d->rssi = int16_t(std::lround(d->rssiAvg));
+        d->signal = SignalLevel(d->rssiAvg, d->signal);
+    }
 
     if (d->state == DeviceState::Connected || d->state == DeviceState::Connecting) return;
 
@@ -294,14 +345,20 @@ void DeviceManager::OnAdvertisement(uint64_t address, const AdvertisementInfo& i
         if (mayRetry) StartConnectLocked(d);           // works in the background too
         return;
     }
-    if (known && m_focused && mayRetry) {
+    // A cable is in a controller of this model: over USB it belongs to the
+    // USB host (Steam), so the background listening must not pull it back to
+    // Bluetooth. With the window open the user is looking at it (as before).
+    const auto loose = m_usbUnmatched.find(d->kind);
+    const bool cableIn = d->onUsb || (loose != m_usbUnmatched.end() && loose->second > 0);
+    const bool listening = m_focused || (ListeningLocked() && !cableIn);
+    if (known && listening && mayRetry) {
         StartConnectLocked(d);                          // known: connect on sync
         return;
     }
     if (d->state == DeviceState::Offline) d->state = DeviceState::Available;
     if (!d->wasVisible) {
         d->wasVisible = true;
-        if (!known && m_focused)
+        if (!known && listening)
             Emit(EventType::Found, std::string(KindName(d->kind)) + tr(" found", " encontrado"), address);
     }
 }
@@ -392,6 +449,7 @@ bool DeviceManager::OnConnected(const std::shared_ptr<Device>& d, const std::sha
     // forgotten while connecting can never end up with a virtual pad.
     if (cancel.load() || !m_running) return false;
     const bool reconnect = d->inSession;
+    if (!m_focused) m_listenGraceUntil = Clock::now() + PAIR_GRACE;
     d->link = link;
     d->inSession = true;
     d->state = DeviceState::Connected;
@@ -399,13 +457,19 @@ bool DeviceManager::OnConnected(const std::shared_ptr<Device>& d, const std::sha
     d->error.clear();
     d->lastPacket = {};
     d->intervalMs = d->jitterMs = 0.f;
+    d->jitterSlow = d->lateRatio = 0.f;
+    d->linkLevel = 0;
+    d->linkLevelAt = {};
     d->streaming = Streaming::Measuring;
+    d->longGapWindow = {};
+    d->longGaps = 0;
+    d->gapWindowStart = {};
+    d->gapCount = d->gapDuringRumble = d->gapDuringScan = 0;
+    d->gapWorstMs = 0.f;
     d->batteryMv = 0.f;
     d->batteryHistory.clear();
     d->batteryHoldUntil = {};
-    d->drainRefTime = {};
-    d->drainRefPct = -1;
-    d->drainPctPerHour = 0.f;
+    ResetDrainLocked(*d);
     d->onUsb = false;              // back on Bluetooth
     d->usbPendingSince = {};
     d->chargingByCurrent = false;
@@ -423,6 +487,10 @@ bool DeviceManager::OnConnected(const std::shared_ptr<Device>& d, const std::sha
     d->lostPendingSince = {};
     d->mouse.Disable();
     d->mouseMode = 0;
+    d->lastActivity = Clock::now();   // a fresh connection counts as activity
+    std::fill(std::begin(d->actButtons), std::end(d->actButtons), uint8_t(0));
+    std::fill(std::begin(d->actStick), std::end(d->actStick), -1);
+    std::fill(std::begin(d->actTrigger), std::end(d->actTrigger), -1);
 
     if (!m_settings.Find(d->address)) {
         DeviceProfile p;
@@ -641,9 +709,7 @@ void DeviceManager::RefreshChargingLocked(Device& d, TimePoint now) {
         // the voltage as it settles. The drain estimate restarts either way.
         if (d.batteryMv > 0.f) d.batteryHoldUntil = now + BATTERY_SETTLE_AFTER_CHARGE;
         d.batteryHistory.clear();
-        d.drainRefTime = {};
-        d.drainRefPct = -1;
-        d.drainPctPerHour = 0.f;
+        ResetDrainLocked(d);
         Log(name + ": charging stopped");
     }
 }
@@ -678,20 +744,54 @@ void DeviceManager::ConfirmUsbLocked(const std::shared_ptr<Device>& d) {
          d->address);
 }
 
+// Drops the link and the virtual controller and removes the device from the
+// session. The returned link must be closed outside the lock.
+std::shared_ptr<Switch2Link> DeviceManager::EndSessionLocked(std::map<uint64_t, std::shared_ptr<Device>>::iterator it) {
+    const auto d = it->second;
+    if (d->cancel) d->cancel->store(true);
+    auto link = std::move(d->link);
+    d->inSession = false;
+    d->state = DeviceState::Offline;
+    RemoveFromSlotLocked(d);
+    m_devices.erase(it);
+    return link;
+}
+
+// End of play: the controller loses its link and goes to sleep by itself
+// (the power-off command is deliberately never sent, see IsCommandAllowed),
+// while its profile stays saved. Pressing sync connects it again.
+void DeviceManager::Disconnect(uint64_t address, int idleMinutes) {
+    std::shared_ptr<Switch2Link> link;
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        const auto it = m_devices.find(address);
+        if (it == m_devices.end()) return;
+        name = NameLocked(address, it->second->kind);
+        link = EndSessionLocked(it);
+        m_listenGraceUntil = {};
+    }
+    if (link) std::thread([link] { link->Rumble(0.f); link->Close(); }).detach();
+    std::string text = name;
+    if (idleMinutes > 0) {
+        char b[160];
+        std::snprintf(b, sizeof(b), tr(" disconnected after %d min without use · press sync to play again",
+                                       " desconectado após %d min sem uso · aperte sync para jogar de novo"), idleMinutes);
+        text += b;
+    } else {
+        text += tr(" disconnected · press sync to play again", " desconectado · aperte sync para jogar de novo");
+    }
+    Emit(EventType::Disconnected, text, address);
+}
+
 void DeviceManager::DisconnectAndForget(uint64_t address) {
     std::shared_ptr<Switch2Link> link;
     std::string name;
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         if (auto it = m_devices.find(address); it != m_devices.end()) {
-            const auto d = it->second;
-            name = NameLocked(address, d->kind);
-            if (d->cancel) d->cancel->store(true);
-            link = std::move(d->link);
-            d->inSession = false;
-            d->state = DeviceState::Offline;
-            RemoveFromSlotLocked(d);
-            m_devices.erase(it);
+            name = NameLocked(address, it->second->kind);
+            link = EndSessionLocked(it);
         } else if (const auto* p = m_settings.Find(address)) {
             name = p->name;
         }
@@ -699,7 +799,7 @@ void DeviceManager::DisconnectAndForget(uint64_t address) {
         MarkDirtyLocked();
     }
     if (link) std::thread([link] { link->Rumble(0.f); link->Close(); }).detach();
-    Emit(EventType::Disconnected,
+    Emit(EventType::Forgotten,
          (name.empty() ? std::string(tr("Controller", "Controle")) : name) + tr(" disconnected and forgotten", " desconectado e esquecido"),
          address);
 }
@@ -736,8 +836,11 @@ std::vector<DeviceView> DeviceManager::Snapshot() const {
             v.inSession  = d->inSession;
             v.visible    = IsVisible(d->lastSeen, now);
             v.rssi       = d->rssi;
+            v.signal     = d->signal;
             v.intervalMs = d->intervalMs;
             v.jitterMs   = d->jitterMs;
+            v.linkLevel  = d->state == DeviceState::Connected ? d->linkLevel : 0;
+            v.latePct    = d->lateRatio * 100.f;
             v.error      = d->error;
             v.mouseMode  = d->mouseMode.load();
             v.streaming  = d->streaming;
@@ -746,7 +849,7 @@ std::vector<DeviceView> DeviceManager::Snapshot() const {
             if (d->state == DeviceState::Connected && d->batteryMv > 0.f) {
                 v.batteryMv  = int(d->batteryMv);
                 v.batteryPct = BatteryPercent(v.batteryMv);
-                v.batteryMinutesLeft = MinutesLeft(*d, v.batteryPct, v.batteryMeasured);
+                v.batteryMinutesLeft = MinutesLeft(*d, v.batteryPct, now, v.batteryMeasured);
             }
             if (d->slot) {
                 v.player   = d->slot->player;
@@ -774,6 +877,9 @@ bool DeviceManager::LiveInputFor(uint64_t address, LiveInput& out) const {
     out.hasRight = d.kind != ControllerKind::JoyConL;
     if (out.hasLeft)  ExtractRawStick(d.lastReport, true, out.rawLX, out.rawLY);
     if (out.hasRight) ExtractRawStick(d.lastReport, false, out.rawRX, out.rawRY);
+    out.hasMotion = ExtractMotion(d.lastReport, out.gyro, out.accel);
+    out.hasBack = d.kind == ControllerKind::ProController;
+    if (out.hasBack) ProBackButtons(d.lastReport, out.gl, out.gr);
     if (d.slot) {
         std::lock_guard<std::mutex> sl(d.slot->mutex);
         out.report = d.slot->last;
