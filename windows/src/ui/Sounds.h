@@ -9,10 +9,12 @@ enum class Sound {
     Connected,     // rising two-note chime
     Reconnected,   // quick rising triple
     Lost,          // distinctive alert: a controller lost its connection mid-game
-    Disconnected,  // single falling pop: user disconnected / forgot
-    Error,         // low double knock
+    Disconnected,  // two notes winding down: the user ended a controller's session
+    Forgotten,     // quick falling sweep: a controller was removed from the list
+    Error,         // low double knock: a connection attempt failed
     Toggle,        // tiny tock: switches and mode changes
-    BatteryLow,    // two soft falling notes
+    SearchStart,   // soft "sonar" shimmer: listening for controllers started
+    BatteryLow,    // low "dum-dum, dum-dum": a controller's battery turned red
     Count
 };
 
