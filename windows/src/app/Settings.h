@@ -23,6 +23,9 @@ struct InputConfig {
     // handy when pressing a stick mid-game is awkward.
     ButtonMapping    gl = ButtonMapping::L3;
     ButtonMapping    gr = ButtonMapping::R3;
+    // Motion sensors forwarded to the virtual controller (and the DSU server).
+    // In a combined Joy-Con pair: both on = average, one on = that side only.
+    bool             gyro = true;
 };
 
 struct DeviceProfile {
@@ -40,6 +43,7 @@ struct AppSettings {
     bool  swapABXY       = false;
     float deadzone       = 0.08f;
     GyroSource gyroSource = GyroSource::Both;
+    int   idleDisconnectMin = 0;   // disconnect (not forget) after this long without input; 0 = never
 
     // Feedback
     bool  sounds = true;
@@ -52,6 +56,10 @@ struct AppSettings {
 
     // Emulators
     bool dsuServer = false;
+
+    // Window: closing it keeps the app running in the notification area.
+    // (Starting with Windows lives in the registry Run key, see platform/Autostart.h.)
+    bool closeToTray = true;
 
     std::vector<DeviceProfile> known;
 
