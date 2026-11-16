@@ -12,11 +12,15 @@ O app conecta o controle por Bluetooth LE e cria um **DualShock 4 virtual** (via
 
 ## Destaques
 
-- **Busca automática**: com o app aberto, aperte o sync. Controles conhecidos conectam sozinhos; os novos aparecem com o botão **Conectar**.
+- **Busca automática**: aperte o sync. Controles conhecidos conectam sozinhos, mesmo com o app na bandeja; os novos aparecem com o botão **Conectar**.
+- **Bandeja e início com o Windows**: fechar a janela mantém o app rodando na bandeja, e ele pode iniciar junto com o Windows (opcional, também no instalador).
 - **Reconexão em segundo plano**: se um controle cair, ele volta no mesmo controle virtual ao apertar o sync.
 - **Seguro para o seu Switch 2**: nada é gravado nos controles. Comandos de pareamento, firmware e desligamento são bloqueados no código.
 - **Cabo USB**: plugar o cabo só carrega o controle (ele desliga o Bluetooth sozinho), e o app avisa isso em vez de acusar queda.
-- **Extras**: Joy-Cons L+R em par ou sozinhos (vertical/horizontal), calibração e zona morta, teste ao vivo, mouse óptico do Joy-Con 2, vibração, servidor DSU para giroscópio em emuladores, bateria com tempo restante estimado, interface em inglês e português, aviso de nova versão.
+- **Por controle**: nome próprio, calibração, botões GL/GR do Pro Controller 2 e giroscópio ligado ou desligado.
+- **Testes**: teste ao vivo dos botões e analógicos, e teste de giroscópio com um modelo 3D que gira junto com o controle.
+- **Bateria**: porcentagem no ícone, tempo restante medido pelo consumo da sessão e desconexão automática de controles parados (opcional).
+- **Extras**: Joy-Cons L+R em par ou sozinhos (vertical/horizontal), zona morta, mouse óptico do Joy-Con 2, vibração, servidor DSU para giroscópio em emuladores, indicador de qualidade da conexão, interface em inglês e português, aviso de nova versão.
 
 ## Instalar
 
@@ -53,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File windows\installer\build.ps1
 # out\installer\SW2Adapter-<versão>-x64.msi
 ```
 
-A versão vem de `windows/src/app/Version.h`. Configurações e log ficam em `%APPDATA%\sw2-joycons-adapter\`.
+A versão vem de `windows/src/app/Version.h`. Configurações e log ficam em `%APPDATA%\sw2-joycons-adapter\`; o início com o Windows é uma entrada em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Créditos
 
