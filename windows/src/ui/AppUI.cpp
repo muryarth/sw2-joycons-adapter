@@ -99,6 +99,8 @@ void AppUI::SetupFonts(float dpiScale) {
     };
     g_fonts.regular  = load(regular);
     g_fonts.semibold = load(semibold);
+    const char* bold = FileExists("C:\\Windows\\Fonts\\segoeuib.ttf") ? "C:\\Windows\\Fonts\\segoeuib.ttf" : semibold;
+    g_fonts.bold = bold ? io.Fonts->AddFontFromFileTTF(bold, SIZE_BODY) : g_fonts.semibold;
     io.FontDefault = g_fonts.regular;
 }
 
@@ -136,9 +138,9 @@ void AppUI::SetupStyle(float dpiScale) {
     c[ImGuiCol_TitleBg]              = Rgb4(BG);
     c[ImGuiCol_TitleBgActive]        = Rgb4(BG);
     c[ImGuiCol_ScrollbarBg]          = Rgb4(0, 0.f);
-    c[ImGuiCol_ScrollbarGrab]        = Rgb4(SURFACE_3, 0.8f);
-    c[ImGuiCol_ScrollbarGrabHovered] = Rgb4(HOVER);
-    c[ImGuiCol_ScrollbarGrabActive]  = Rgb4(PRESSED);
+    c[ImGuiCol_ScrollbarGrab]        = Rgb4(0x6A6E80);   // visible on the page background without shouting
+    c[ImGuiCol_ScrollbarGrabHovered] = Rgb4(0x868A9C);
+    c[ImGuiCol_ScrollbarGrabActive]  = Rgb4(0x9DA1B2);
     c[ImGuiCol_CheckMark]            = Rgb4(ACCENT);
     c[ImGuiCol_SliderGrab]           = Rgb4(ACCENT);
     c[ImGuiCol_SliderGrabActive]     = Rgb4(ACCENT_HI);
@@ -162,7 +164,8 @@ void AppUI::Navigate(Page p, uint64_t address) {
     m_page = p;
     m_selected = address;
     m_renameFor = 0;
-    ImGui::SetScrollY(0.f);
+    m_scrollTop = true;   // applied to the scrolling root window next frame
+    m_autostart = -1;     // the installer or another copy may have changed it
 }
 
 void AppUI::PushToast(const std::string& text, unsigned color, const char* glyph) {
@@ -177,7 +180,8 @@ void AppUI::HandleEvents() {
             case EventType::Connected:    m_sounds.Play(Sound::Connected);    PushToast(e.text, SUCCESS, icon::Check); break;
             case EventType::Reconnected:  m_sounds.Play(Sound::Reconnected);  PushToast(e.text, SUCCESS, icon::Sync); break;
             case EventType::Lost:         m_sounds.Play(Sound::Lost);         PushToast(e.text, WARNING, icon::Warning); break;
-            case EventType::Disconnected: m_sounds.Play(Sound::Disconnected); PushToast(e.text, MUTED, icon::Close); break;
+            case EventType::Disconnected: m_sounds.Play(Sound::Disconnected); PushToast(e.text, MUTED, icon::Power); break;
+            case EventType::Forgotten:    m_sounds.Play(Sound::Forgotten);    PushToast(e.text, MUTED, icon::Delete); break;
             case EventType::Failed:       m_sounds.Play(Sound::Error);        PushToast(e.text, DANGER, icon::Warning); break;
             case EventType::MouseMode:    m_sounds.Play(Sound::Toggle);       PushToast(e.text, MUTED, icon::Info); break;
             case EventType::BatteryLow:   m_sounds.Play(Sound::BatteryLow);   PushToast(e.text, WARNING, icon::Warning); break;
@@ -201,6 +205,7 @@ void AppUI::Background() {
 
 void AppUI::Frame(bool focused) {
     m_focused = focused;
+    ui::g_animating = false;   // animated widgets set it again while drawing
     m_dev.Tick(focused);
     m_settings = m_dev.Settings();   // one copy per frame, shared by every page
     const AppSettings& s = m_settings;
@@ -213,18 +218,23 @@ void AppUI::Frame(bool focused) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
+    if (m_scrollTop) { ImGui::SetNextWindowScroll({0.f, 0.f}); m_scrollTop = false; }
+    // The root window scrolls, so the scrollbar sits on the window edge with
+    // the same gap to the content on both sides.
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {Dp(20.f), Dp(18.f)});
     ImGui::Begin("##root", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImGui::PopStyleVar();
 
-    // Centered column: comfortable line length on wide windows.
+    // Centered column (comfortable line length on wide windows), as tall as
+    // its content: it never scrolls itself.
     const float avail = ImGui::GetContentRegionAvail().x;
     const float colW = std::min(avail, Dp(560.f));
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - colW) * 0.5f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
-    ImGui::BeginChild("##column", {colW, 0}, ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##column", {colW, 0}, ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
 
     DrawHeader();
@@ -233,13 +243,14 @@ void AppUI::Frame(bool focused) {
         case Page::Device:   DrawDevicePage(devices); break;
         case Page::Settings: DrawSettingsPage(); break;
     }
-    ImGui::Dummy({0, Dp(64.f)});   // room for toasts
+    ImGui::Dummy({0, Dp(4.f)});   // with the window padding: a modest gap at the end
 
     DrawCalibration();
     DrawConfirm();
     ImGui::EndChild();
     ImGui::End();
     DrawToasts();
+    m_animating = ui::g_animating || !m_toasts.empty();
 }
 
 // ===========================================================================

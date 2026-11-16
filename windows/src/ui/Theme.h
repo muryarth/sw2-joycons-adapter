@@ -30,6 +30,14 @@ constexpr unsigned ACCENT_HI = 0xFF7378;
 constexpr unsigned SUCCESS   = 0x3DD68C;
 constexpr unsigned WARNING   = 0xF5B544;
 constexpr unsigned DANGER    = 0xF06A6A;
+// Joy-Con identity: neon blue left, neon red right (like the classic pair).
+constexpr unsigned JOYCON_L  = 0x14B4EB;
+constexpr unsigned JOYCON_R  = ACCENT;     // same red as the other controllers
+// Solid battery fills: deeper than the text tokens so white numerals stay
+// readable on top of them.
+constexpr unsigned BATTERY_OK   = 0x1FA463;
+constexpr unsigned BATTERY_MID  = 0xD08A12;
+constexpr unsigned BATTERY_LOW  = 0xE0434A;
 
 // Segoe Fluent Icons / Segoe MDL2 Assets code points (UTF-8, needs /utf-8).
 namespace icon {
@@ -51,11 +59,13 @@ constexpr const char* Link      = "";
 constexpr const char* Sync      = "";
 constexpr const char* Edit      = "";
 constexpr const char* Copy      = "";
+constexpr const char* Power     = "";
 } // namespace icon
 
 struct Fonts {
     ImFont* regular  = nullptr;   // Segoe UI + icons
     ImFont* semibold = nullptr;   // Segoe UI Semibold + icons
+    ImFont* bold     = nullptr;   // Segoe UI Bold (small numerals, e.g. inside the battery)
 };
 
 // Logical sizes (scaled by DPI through style.FontScaleDpi).

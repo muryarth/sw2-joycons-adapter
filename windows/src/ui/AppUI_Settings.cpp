@@ -4,6 +4,7 @@
 
 #include "app/Version.h"
 #include "core/I18n.h"
+#include "platform/Autostart.h"
 #include "ui/Layout.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
@@ -41,7 +42,23 @@ void AppUI::DrawSettingsPage() {
     if (ToggleRow("##auto", tr("Auto search", "Buscar automaticamente"),
                   tr("While the app is open, listens for controllers in sync mode and connects the known ones.",
                      "Com o app aberto, procura controles em modo sync e conecta os conhecidos."), &s.autoSearch))
-        apply([v = s.autoSearch](AppSettings& a) { a.autoSearch = v; });
+    {
+        if (s.autoSearch) m_sounds.Play(Sound::SearchStart); else Click();
+        m_dev.UpdateSettings([v = s.autoSearch](AppSettings& a) { a.autoSearch = v; });
+    }
+    Divider();
+    {
+        // Idle auto-disconnect: the controller is disconnected (it stays
+        // saved) and goes to sleep, saving its battery.
+        Label(tr("Disconnect idle controllers", "Desconectar controles parados"));
+        static const int minutes[] = {0, 5, 15, 30, 60};
+        const char* idleLabels[] = {tr("Never", "Nunca"), "5 min", "15 min", "30 min", "1 h"};
+        int idx = 0;
+        for (int i = 0; i < 5; ++i) if (minutes[i] == s.idleDisconnectMin) idx = i;
+        if (Segmented("##idle", &idx, idleLabels, 5)) apply([m = minutes[idx]](AppSettings& a) { a.idleDisconnectMin = m; });
+        TextSmall(MUTED, "%s", tr("With no button or stick used for this long, the controller disconnects and sleeps. It stays saved: press sync to play again.",
+                                  "Sem usar botões ou analógicos por esse tempo, o controle desconecta e dorme. Ele continua salvo: aperte sync para jogar de novo."));
+    }
     Divider();
     if (ToggleRow("##combine", tr("Combine Joy-Cons", "Combinar Joy-Cons"),
                   tr("A left and a right Joy-Con become a single controller.", "Um Joy-Con L e um R viram um único controle."), &s.combineJoyCons))
@@ -57,11 +74,6 @@ void AppUI::DrawSettingsPage() {
         const float v = dz / 100.f;
         m_dev.UpdateSettings([v](AppSettings& a) { a.deadzone = v; });
     }
-    Divider();
-    Label(tr("Gyro of a Joy-Con pair", "Giroscópio do par de Joy-Cons"));
-    const char* gyro[] = {tr("Average", "Média"), tr("Left", "Esquerdo"), tr("Right", "Direito")};
-    int g = int(s.gyroSource);
-    if (Segmented("##gyro", &g, gyro, 3)) apply([g](AppSettings& a) { a.gyroSource = static_cast<GyroSource>(g); });
     EndCard();
 
     SectionTitle(tr("SOUNDS", "SONS"));
@@ -72,9 +84,24 @@ void AppUI::DrawSettingsPage() {
     ImGui::BeginDisabled(!s.sounds);
     int vol = int(std::lround(s.volume * 100.f));
     const float y = ImGui::GetCursorPosY();
-    if (IconButton("##preview", s.volume > 0.f ? icon::Volume : icon::Mute, tr("Play", "Ouvir"), MUTED, 28.f)) {
+    if (IconButton("##preview", s.volume > 0.f ? icon::Volume : icon::Mute,
+                   tr("Play the cues (one per click)", "Ouvir os avisos (um por clique)"), MUTED, 28.f)) {
+        struct Cue { Sound sound; const char* en; const char* pt; };
+        static const Cue cues[] = {
+            {Sound::SearchStart,  "Search started",      "Busca iniciada"},
+            {Sound::Found,        "Controller found",    "Controle encontrado"},
+            {Sound::Connected,    "Connected",           "Conectado"},
+            {Sound::Reconnected,  "Reconnected",         "Reconectado"},
+            {Sound::Error,        "Connection failed",   "Falha ao conectar"},
+            {Sound::Lost,         "Connection lost",     "Conexão perdida"},
+            {Sound::BatteryLow,   "Low battery",         "Bateria fraca"},
+            {Sound::Disconnected, "Disconnected",        "Desconectado"},
+            {Sound::Forgotten,    "Forgotten",           "Esquecido"},
+        };
+        const Cue& c = cues[m_previewCue++ % (sizeof(cues) / sizeof(cues[0]))];
         m_sounds.SetVolume(s.volume);
-        m_sounds.Play(Sound::Connected);
+        m_sounds.Play(c.sound);
+        PushToast(tr(c.en, c.pt), MUTED, icon::Volume);
     }
     ImGui::SameLine(0, Dp(8.f));
     ImGui::SetCursorPosY(y + Dp(2.f));
@@ -83,6 +110,26 @@ void AppUI::DrawSettingsPage() {
         m_dev.UpdateSettings([v](AppSettings& a) { a.volume = v; });
     }
     ImGui::EndDisabled();
+    EndCard();
+
+    SectionTitle(tr("WINDOWS", "WINDOWS"));
+    BeginCard("##system", 18.f);
+    {
+        if (m_autostart < 0) m_autostart = IsAutostartEnabled() ? 1 : 0;   // read once per visit
+        bool autostart = m_autostart == 1;
+        if (ToggleRow("##autostart", tr("Start with Windows", "Iniciar com o Windows"),
+                      tr("Opens quietly in the notification area when you sign in, ready to connect your controllers.",
+                         "Abre discretamente na bandeja ao entrar no Windows, pronto para conectar seus controles."), &autostart)) {
+            Click();
+            if (SetAutostart(autostart)) m_autostart = autostart ? 1 : 0;
+            else PushToast(tr("Could not change the startup setting", "Não foi possível alterar a inicialização"), DANGER, icon::Warning);
+        }
+        Divider();
+        if (ToggleRow("##tray", tr("Keep running when closed", "Continuar rodando ao fechar"),
+                      tr("Closing the window keeps the app in the notification area. Right-click its icon to quit.",
+                         "Fechar a janela mantém o app na bandeja. Clique com o botão direito no ícone para sair."), &s.closeToTray))
+            apply([v = s.closeToTray](AppSettings& a) { a.closeToTray = v; });
+    }
     EndCard();
 
     SectionTitle(tr("STEAM COMPATIBILITY", "COMPATIBILIDADE COM A STEAM"));
@@ -195,7 +242,7 @@ void AppUI::DrawSettingsPage() {
         std::snprintf(ver, sizeof(ver), "v%s", APP_VERSION);
         Badge(ver, MUTED);   // neutral: a version is information, not a status
         ImGui::EndGroup();
-        ImGui::Dummy({0, Dp(2.f)});
+        Divider();   // same rhythm as the setting rows: identity | updates | actions
 
         // Update status
         const UpdateInfo u = m_updates.Get();

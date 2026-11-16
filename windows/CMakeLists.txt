@@ -45,6 +45,7 @@ add_executable(sw2-adapter WIN32
     src/ble/Switch2Link.cpp
     src/output/DsuServer.cpp
     src/output/VirtualPad.cpp
+    src/platform/Autostart.cpp
     src/platform/UsbWatcher.cpp
     src/ui/AppUI.cpp
     src/ui/AppUI_Device.cpp

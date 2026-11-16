@@ -15,8 +15,8 @@ void  Divider();
 float HalfWidth();
 // Opens a URL in the default browser.
 void  OpenUrl(const std::string& url);
-// Remaining time: compact "33h" / "45min", or full "33 h 10 min". Rounded to
-// 10 min above one hour (it is an estimate). Empty when unknown (< 0).
+// Remaining time: compact "5h07m" / "45m", or full "5 h 07 min".
+// Empty when unknown (< 0).
 std::string FormatDuration(int minutes, bool compact);
 
 } // namespace sw2::ui

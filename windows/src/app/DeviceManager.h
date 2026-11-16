@@ -2,11 +2,14 @@
 // Owns discovery, connections, virtual controllers ("slots") and the
 // session rules:
 //  * App focused + auto search on  -> continuous scan, list everything in sync.
-//  * App in background             -> scan ONLY while a controller connected in
+//  * App in background             -> scan while no controller is connected (auto
+//                                     search on), or while a controller connected in
 //                                     this session is missing; stop when it is back.
 //  * Known controllers (saved) connect automatically when they show up in sync.
 //  * Unknown controllers are listed with a "Connect" button.
-//  * "Disconnect" drops the link, removes it from the session and forgets it.
+//  * "Disconnect" drops the link and ends its session; it stays saved, and the
+//    controller goes to sleep by itself once the link is gone.
+//  * "Disconnect and forget" also removes it from the saved controllers.
 //  * "Wake" advertisements (a controller calling its Switch 2) are ignored.
 //
 // Implementation is split by responsibility:
@@ -48,7 +51,7 @@ enum class DeviceState { Available, Offline, Connecting, Connected, WaitingSync 
 // continuous streams make the "no data -> release everything" watchdog safe.
 enum class Streaming { Measuring, Continuous, OnChange };
 
-enum class EventType { Found, Connected, Reconnected, Lost, Disconnected, Failed, MouseMode, BatteryLow, UsbConnected, UsbRemoved, Info };
+enum class EventType { Found, Connected, Reconnected, Lost, Disconnected, Forgotten, Failed, MouseMode, BatteryLow, UsbConnected, UsbRemoved, Info };
 
 struct Event {
     EventType   type;
@@ -66,9 +69,12 @@ struct DeviceView {
     bool           visible = false;    // seen in sync mode recently
     int            player = 0;         // 1-based, 0 = none
     bool           combined = false;   // part of an L+R pair
-    int16_t        rssi = 0;
+    int16_t        rssi = 0;           // smoothed
+    int            signal = 0;         // 0..4 bars, smoothed and with hysteresis (0 = unknown)
     float          intervalMs = 0.f;   // average time between input packets
     float          jitterMs = 0.f;
+    int            linkLevel = 0;      // connection ladder while connected: 0 not measured, 1..4
+    float          latePct = 0.f;      // share of reports that arrived clearly late (recent, %)
     int            mouseMode = 0;      // OpticalMouse::Mode
     Streaming      streaming = Streaming::Measuring;
     int            batteryMv = 0;      // smoothed, 0 = unknown
@@ -85,6 +91,9 @@ struct LiveInput {
     DS4_REPORT_EX report{};
     bool          hasLeft = false, hasRight = false;
     int           rawLX = 2048, rawLY = 2048, rawRX = 2048, rawRY = 2048;
+    bool          hasBack = false, gl = false, gr = false;   // Pro Controller 2 back buttons, as pressed
+    bool          hasMotion = false;                         // this controller's own sensors (not the pair's mix)
+    int16_t       gyro[3] = {}, accel[3] = {};
 };
 
 class DeviceManager {
@@ -105,6 +114,7 @@ public:
 
     // UI actions
     void Connect(uint64_t address);
+    void Disconnect(uint64_t address, int idleMinutes = 0);   // ends the session; the controller stays saved
     void DisconnectAndForget(uint64_t address);
     void Identify(uint64_t address);
     void TestRumble(uint64_t address);
@@ -132,7 +142,9 @@ private:
         // Discovery
         TimePoint      lastSeen{};
         bool           wasVisible = false;
-        int16_t        rssi = 0;
+        int16_t        rssi = 0;               // smoothed
+        float          rssiAvg = 0.f;          // 0 = no sample yet
+        int            signal = 0;             // bars shown (see SignalLevel)
         // Connection
         std::shared_ptr<Switch2Link> link;
         std::shared_ptr<Slot> slot;
@@ -143,8 +155,16 @@ private:
         // Input statistics
         TimePoint      lastPacket{};
         float          intervalMs = 0.f, jitterMs = 0.f;
+        float          jitterSlow = 0.f, lateRatio = 0.f;   // slow averages behind the connection ladder
+        int            linkLevel = 0;
+        TimePoint      linkLevelAt{};
         Streaming      streaming = Streaming::Measuring;
+        TimePoint      gapWindowStart{};       // stutter diagnostics (see TrackInputGapsLocked)
+        unsigned       gapCount = 0, gapDuringRumble = 0, gapDuringScan = 0;
+        float          gapWorstMs = 0.f;
         TimePoint      streamCheckStart{};
+        TimePoint      longGapWindow{};                // repeated long gaps: see UpdateStatsLocked
+        int            longGaps = 0;
         std::vector<uint8_t> lastReport;
         uint64_t       traceCount = 0;         // --trace bookkeeping
         size_t         traceLastSize = 0;
@@ -156,11 +176,19 @@ private:
         // Battery
         float          batteryMv = 0.f;        // smoothed voltage
         bool           batteryWarned = false;  // low-battery cue shown
-        TimePoint      drainRefTime{};         // reference sample for the drain rate
-        int            drainRefPct = -1;
+        // Remaining-time estimate (see UpdateDrainRateLocked)
+        float          levelPct = -1.f;        // slowly smoothed level, unrounded
+        TimePoint      levelTime{};
+        std::deque<std::pair<TimePoint, float>> drainSamples;   // levelPct once a minute, sliding window
         float          drainPctPerHour = 0.f;  // 0 = not measured yet
+        TimePoint      emptyAt{};              // projected moment the battery runs out ({} = none)
+        // Idle auto-disconnect: last time a button or stick actually moved
+        TimePoint      lastActivity{};
+        uint8_t        actButtons[4] = {};
+        int            actStick[4] = {-1, -1, -1, -1};   // raw LX, LY, RX, RY at the last activity
+        int            actTrigger[2] = {-1, -1};         // GameCube analog triggers
         // Features
-        OpticalMouse   mouse;                  // touched only by this device's input thread
+        OpticalMouse   mouse;                 // touched only by this device's input thread
         std::atomic<int> mouseMode{0};         // mirror of mouse.CurrentMode() for other threads
         TimePoint      testRumbleUntil{};
         // USB cable: plugging it makes the controller drop Bluetooth on its own.
@@ -171,6 +199,7 @@ private:
         bool           chargingByCurrent = false;   // battery current in the reports says it is charging
         int            currentStreak = 0;           // debounce for chargingByCurrent
         bool           chargingShown = false;       // chargingByCurrent || chargingOnBle, as last applied
+        TimePoint      chargeLogAt{};               // last "charging · mV/I" diagnostics line
     };
     struct Slot {
         int           player = 0;
@@ -188,7 +217,6 @@ private:
     struct Runtime {   // global options needed in the input path
         float      deadzone = 0.08f;
         bool       swap = false;
-        GyroSource gyro = GyroSource::Both;
     };
 
     // --- DeviceManager.cpp ---
@@ -206,6 +234,7 @@ private:
     int SessionCountLocked(ControllerKind kind) const;
     static void RollBackBatteryLocked(Device& d, TimePoint before);
     void RefreshChargingLocked(Device& d, TimePoint now);
+    void TrackInputGapsLocked(Device& d, float dt, TimePoint now);
     bool UsbOnlyLocked(const DeviceProfile& p) const;
     void ApplyRuntimeLocked();
     void MarkDirtyLocked();
@@ -213,6 +242,8 @@ private:
     void Emit(EventType t, const std::string& text, uint64_t address = 0);
     void Log(const std::string& line);
     std::string NameLocked(uint64_t address, ControllerKind kind) const;
+    bool ListeningLocked() const;   // scanning while nothing is connected (also in the background)
+    std::shared_ptr<Switch2Link> EndSessionLocked(std::map<uint64_t, std::shared_ptr<Device>>::iterator it);
 
     // --- DeviceManager_Slots.cpp ---
     std::shared_ptr<Slot> AssignSlotLocked(const std::shared_ptr<Device>& d);
@@ -230,9 +261,11 @@ private:
     // --- DeviceManager_Input.cpp ---
     void OnInput(const std::shared_ptr<Device>& d, std::vector<uint8_t> report);
     void UpdateStatsLocked(Device& d, TimePoint now);
+    static void TrackActivityLocked(Device& d, const std::vector<uint8_t>& report, TimePoint now);
     void UpdateBatteryLocked(Device& d, const std::vector<uint8_t>& report, TimePoint now);
-    void UpdateDrainRateLocked(Device& d, int pct, TimePoint now);
-    static int MinutesLeft(const Device& d, int pct, bool& measured);
+    void UpdateDrainRateLocked(Device& d, TimePoint now);
+    static void ResetDrainLocked(Device& d);
+    static int MinutesLeft(const Device& d, int pct, TimePoint now, bool& measured);
     void HandleMouse(Device& d, const std::shared_ptr<Switch2Link>& link, std::vector<uint8_t>& report,
                      const InputConfig& cfg, uint8_t playerLeds);
 
@@ -248,6 +281,7 @@ private:
     bool        m_trace = false;
     std::set<uint64_t> m_wakeLogged;
     TimePoint   m_manualSearchUntil{};
+    TimePoint   m_listenGraceUntil{};   // see ListeningLocked
 
     PVIGEM_CLIENT m_vigem = nullptr;
     bool          m_vigemOk = false;

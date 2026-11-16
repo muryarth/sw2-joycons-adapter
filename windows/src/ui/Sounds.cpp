@@ -102,11 +102,23 @@ std::vector<Tone> Score(Sound s) {
             return {{0.00f, 1318.5f, 1318.5f, 0.085f, 0.75f},
                     {0.12f, 1318.5f, 1318.5f, 0.085f, 0.75f},
                     {0.26f, 988.f, 659.f, 0.34f, 0.70f}};
-        case Sound::BatteryLow:   // two soft notes, downward
-            return {{0.00f, 1046.5f, 1046.5f, 0.12f, 0.45f},
-                    {0.09f, 784.f, 784.f, 0.22f, 0.40f}};
-        case Sound::Disconnected: // single falling pop
-            return {{0.00f, 784.f, 622.f, 0.16f, 0.50f}};
+        case Sound::BatteryLow:   // signature: a low "dum-dum" played twice
+            // Lower register than every other cue and the only one with a
+            // repeated phrase, so it stands out without being an alarm.
+            return {{0.00f, 784.f, 784.f, 0.12f, 0.62f},
+                    {0.13f, 659.f, 659.f, 0.18f, 0.62f},
+                    {0.44f, 784.f, 784.f, 0.12f, 0.52f},
+                    {0.57f, 659.f, 587.f, 0.24f, 0.52f}};
+        case Sound::Disconnected: // two notes winding down, like powering off
+            return {{0.00f, 1046.5f, 1046.5f, 0.10f, 0.45f},
+                    {0.085f, 784.f, 698.f, 0.24f, 0.45f}};
+        case Sound::Forgotten:    // quick falling sweep: "erased"
+            return {{0.00f, 1318.5f, 1318.5f, 0.07f, 0.40f},
+                    {0.06f, 1046.5f, 1046.5f, 0.07f, 0.40f},
+                    {0.12f, 784.f, 523.f, 0.26f, 0.45f}};
+        case Sound::SearchStart:  // soft "sonar": two airy upward glides
+            return {{0.00f, 659.f, 1318.5f, 0.22f, 0.32f},
+                    {0.11f, 988.f, 1568.f, 0.26f, 0.24f}};
         case Sound::Error:        // low, muted double knock
             return {{0.00f, 392.f, 349.f, 0.10f, 0.55f},
                     {0.13f, 392.f, 330.f, 0.14f, 0.50f}};

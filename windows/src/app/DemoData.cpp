@@ -28,8 +28,11 @@ void AppendViews(std::vector<DeviceView>& out) {
         v.inSession  = state == DeviceState::Connected || state == DeviceState::WaitingSync;
         v.visible    = state == DeviceState::Available;
         v.rssi       = -64;
+        v.signal     = 3;
         v.intervalMs = 7.9f;
         v.jitterMs   = 0.6f;
+        v.linkLevel  = state == DeviceState::Connected ? 4 : 0;
+        v.streaming  = state == DeviceState::Connected ? Streaming::Continuous : Streaming::Measuring;
         if (state == DeviceState::Connected) {
             v.batteryMv  = batteryMv;
             v.batteryPct = BatteryPercent(batteryMv);
@@ -51,6 +54,7 @@ void FillLiveInput(LiveInput& out) {
     out = LiveInput{};
     out.valid = true;
     out.hasLeft = out.hasRight = true;
+    out.hasBack = true;
     out.report = ToVigem(NeutralReport());
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     auto& r = out.report.Report;
@@ -65,6 +69,14 @@ void FillLiveInput(LiveInput& out) {
         case 2: DS4_SET_DPAD(reinterpret_cast<PDS4_REPORT>(&r), DS4_BUTTON_DPAD_EAST); break;
         default: r.bSpecial |= DS4_SPECIAL_BUTTON_PS; break;
     }
+    out.gl = int(t * 1.5) % 4 == 2;
+    out.hasMotion = true;   // a controller held almost still: a barely visible sway
+    out.gyro[0] = int16_t(14 * std::cos(t * 0.5 + 1.0));
+    out.gyro[1] = int16_t(-18 * std::cos(t * 0.7));
+    out.gyro[2] = int16_t(6 * std::sin(t * 0.9));
+    out.accel[0] = int16_t(150 * std::sin(t * 0.7));
+    out.accel[1] = int16_t(-620 + 110 * std::sin(t * 0.5 + 1.0));
+    out.accel[2] = 4100;
 }
 
 } // namespace sw2::demo

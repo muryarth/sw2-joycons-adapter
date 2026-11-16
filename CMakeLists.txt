@@ -3,7 +3,7 @@
 #   windows/  Windows desktop app (BLE via WinRT, ViGEmBus, ImGui/DX11) + MSI installer.
 #   android/  Android app (planned; builds core/ through the NDK with its own Gradle/CMake).
 cmake_minimum_required(VERSION 3.20)
-project(sw2-joycons-adapter VERSION 0.4.0 LANGUAGES CXX)
+project(sw2-joycons-adapter VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

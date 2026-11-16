@@ -4,7 +4,9 @@
 #include "core/I18n.h"
 #include "output/Ds4Bridge.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 
 namespace sw2 {
@@ -13,18 +15,49 @@ namespace {
 constexpr float STATS_SMOOTHING      = 0.05f;   // EMA weight of a new packet interval
 constexpr float ON_CHANGE_GAP_MS     = 150.f;   // a gap this long means "reports only on change"
 constexpr auto  CONTINUOUS_PROOF     = std::chrono::seconds(2);
+// Connection ladder: slow averages (a few seconds), so it shows how the link
+// has been doing lately instead of twitching with every late packet; a level
+// only changes when clearly past its threshold and not more than once per
+// LINK_LEVEL_DWELL.
+constexpr float LINK_SMOOTHING       = 0.008f;
+constexpr float LINK_HYSTERESIS      = 1.25f;
+constexpr auto  LINK_LEVEL_DWELL     = std::chrono::milliseconds(1500);
+int RawLinkLevel(float jitterMs, float lateRatio) {
+    if (jitterMs < 2.5f && lateRatio < 0.02f) return 4;
+    if (jitterMs < 5.f  && lateRatio < 0.06f) return 3;
+    if (jitterMs < 10.f && lateRatio < 0.15f) return 2;
+    return 1;
+}
+constexpr float ON_CHANGE_SILENCE_MS = 1000.f;  // once proven continuous: one silence this long...
+constexpr int   ON_CHANGE_REPEAT_GAPS = 3;      // ...or this many long gaps...
+constexpr auto  ON_CHANGE_REPEAT_WINDOW = std::chrono::seconds(10);   // ...within this window
 constexpr float BATTERY_SMOOTHING    = 0.02f;   // voltage sags under rumble: smooth heavily
-constexpr int   BATTERY_LOW_PCT      = 15;
+constexpr int   BATTERY_LOW_PCT      = 19;      // the indicator turns red below 20% (BatteryColor)
 constexpr int   BATTERY_REARM_PCT    = 25;      // warn again only after it recovered
 // Remaining-time estimate
+// The voltage sags under load (rumble) and recovers when idle, so the level
+// wanders by a few percent. The old estimate compared against one reference
+// point and restarted on any 3% rise, falling back to the rated life, which
+// made the time jump up. Now: a slowly smoothed level, sampled once a minute,
+// a least-squares slope over a sliding window, and a projected "empty at"
+// moment that counts down and only eases towards each new estimate.
 constexpr auto  DRAIN_SETTLE         = std::chrono::seconds(90);    // let the voltage settle after connecting
-constexpr float DRAIN_MIN_HOURS      = 0.25f;                       // measure over at least 15 min...
-constexpr int   DRAIN_MIN_DROP_PCT   = 2;                           // ...and a visible drop
-constexpr int   CHARGING_RISE_PCT    = 3;                           // a rise this big = charging: restart
+constexpr float LEVEL_TAU_S          = 120.f;                       // level smoothing time constant
+constexpr auto  DRAIN_SAMPLE_EVERY   = std::chrono::seconds(60);
+constexpr auto  DRAIN_WINDOW         = std::chrono::minutes(45);    // slope over the last 45 min...
+constexpr auto  DRAIN_MIN_SPAN       = std::chrono::minutes(15);    // ...once there are at least 15
+constexpr float DRAIN_MIN_RATE       = 0.3f;                        // %/h; flatter = voltage recovering, keep the old rate
+constexpr float DRAIN_MAX_LIFE       = 1.5f;                        // never project more than 1.5x the rated life
+constexpr auto  DRAIN_MAX_GAP        = std::chrono::minutes(10);    // longer without samples (PC slept): start the window over
+constexpr float DRAIN_JUMP_PCT       = 10.f;                        // a rise this big not seen as charging: start over
+constexpr float ETA_EASE             = 0.25f;                       // per sample: how far the projection moves to a new estimate
 constexpr size_t RECENT_REPORTS      = 120;                         // kept for the disconnect dump
 constexpr auto  BATTERY_HISTORY_STEP = std::chrono::milliseconds(250);
 constexpr auto  BATTERY_HISTORY_SPAN = std::chrono::seconds(5);
 constexpr int   CURRENT_DEBOUNCE     = 3;                            // reports (~45 ms) before trusting a change
+// Stutter diagnostics: holes in a continuous input stream, summarised in the log.
+constexpr float INPUT_GAP_MS         = 60.f;                         // ~4 missed reports
+constexpr auto  GAP_REPORT_EVERY     = std::chrono::seconds(60);
 
 // Nintendo's rated battery life (hours). 0 = unknown: only measured estimates.
 float RatedHours(ControllerKind k) {
@@ -67,6 +100,7 @@ void DeviceManager::OnInput(const std::shared_ptr<Device>& d, std::vector<uint8_
         }
         UpdateStatsLocked(*d, now);
         UpdateBatteryLocked(*d, report, now);
+        TrackActivityLocked(*d, report, now);
         d->lastReport = report;
         slot = d->slot;
         link = d->link;
@@ -95,6 +129,7 @@ void DeviceManager::OnInput(const std::shared_ptr<Device>& d, std::vector<uint8_
 
     std::lock_guard<std::mutex> sl(slot->mutex);
     Ds4Report out;
+    bool motion = cfg.gyro;   // per controller: off = its sensors never reach the game
     if (solo) {
         out = d->kind == ControllerKind::ProController
             ? BuildProReport(report, cfg.calLeft, cfg.calRight, tune, cfg.gl, cfg.gr)
@@ -103,17 +138,80 @@ void DeviceManager::OnInput(const std::shared_ptr<Device>& d, std::vector<uint8_
         if (slot->left == d->address)  slot->leftReport = report;
         if (slot->right == d->address) slot->rightReport = report;
         if (combined) {
+            // A pair sends the average of both sides, or only the side that is on.
+            const GyroSource source = cfgLeft.gyro == cfgRight.gyro ? GyroSource::Both
+                                    : cfgLeft.gyro ? GyroSource::Left : GyroSource::Right;
+            motion = cfgLeft.gyro || cfgRight.gyro;
             out = BuildDualJoyConReport(slot->leftReport, slot->rightReport, cfgLeft.calLeft, cfgRight.calRight,
-                                        tune, cfgLeft.mapping.dpadAsDpad, rt.gyro);
+                                        tune, cfgLeft.mapping.dpadAsDpad, source);
         } else {
             const bool isLeft = d->kind == ControllerKind::JoyConL;
             out = BuildSingleJoyConReport(report, isLeft, isLeft ? cfg.calLeft : cfg.calRight, tune, cfg.mapping);
         }
     }
+    if (!motion) {
+        out.Report.wGyroX = out.Report.wGyroY = out.Report.wGyroZ = 0;
+        out.Report.wAccelX = out.Report.wAccelY = out.Report.wAccelZ = 0;
+    }
     slot->last = ToVigem(out);   // the live test shows the physical buttons: keep the pre-swap state
     slot->hasLast = true;
     if (rt.swap) ApplySwapABXY(out);
     if (slot->pad) slot->pad->Submit(ToVigem(out));
+}
+
+// Counts holes in the input stream of a continuously streaming controller and
+// logs a one-line summary per minute when there were any: how many, the worst,
+// and whether rumble or Bluetooth scanning were active, which helps tell radio
+// interference (headsets, other devices) from the app's own traffic.
+void DeviceManager::TrackInputGapsLocked(Device& d, float dt, TimePoint now) {
+    if (d.streaming == Streaming::Continuous && dt >= INPUT_GAP_MS) {
+        ++d.gapCount;
+        d.gapWorstMs = std::max(d.gapWorstMs, dt);
+        if (d.slot && d.slot->amp.load() > 0.f) ++d.gapDuringRumble;
+        if (Searching()) ++d.gapDuringScan;
+    }
+    if (d.gapWindowStart == TimePoint{}) { d.gapWindowStart = now; return; }
+    if (now - d.gapWindowStart < GAP_REPORT_EVERY) return;
+    if (d.gapCount > 0) {
+        char line[200];
+        std::snprintf(line, sizeof(line), ": %u input gaps (>= %.0f ms) in the last minute, worst %.0f ms · during rumble %u · during scan %u · avg interval %.1f ms",
+                      d.gapCount, INPUT_GAP_MS, d.gapWorstMs, d.gapDuringRumble, d.gapDuringScan, d.intervalMs);
+        Log(NameLocked(d.address, d.kind) + line);
+    }
+    d.gapWindowStart = now;
+    d.gapCount = d.gapDuringRumble = d.gapDuringScan = 0;
+    d.gapWorstMs = 0.f;
+}
+
+// "Activity" for the idle auto-disconnect: a button changed, a stick moved
+// clearly away from where it rested, or an analog trigger moved. Motion
+// sensors are ignored (they change all the time, even on a table).
+void DeviceManager::TrackActivityLocked(Device& d, const std::vector<uint8_t>& report, TimePoint now) {
+    constexpr int STICK_MOVE = 160;     // of 4096: well above resting noise
+    constexpr int TRIGGER_MOVE = 24;    // of 255
+    if (report.size() < 16) return;
+    bool active = d.lastActivity == TimePoint{};
+    for (int i = 0; i < 4; ++i)
+        if (report[3 + i] != d.actButtons[i]) { active = true; d.actButtons[i] = report[3 + i]; }
+    int raw[4];
+    ExtractRawStick(report, true, raw[0], raw[1]);
+    ExtractRawStick(report, false, raw[2], raw[3]);
+    for (int i = 0; i < 4; ++i) {
+        if (d.actStick[i] < 0 || std::abs(raw[i] - d.actStick[i]) > STICK_MOVE) {
+            if (d.actStick[i] >= 0) active = true;
+            d.actStick[i] = raw[i];
+        }
+    }
+    if (report.size() > 0x3D) {
+        for (int i = 0; i < 2; ++i) {
+            const int t = report[0x3C + i];
+            if (d.actTrigger[i] < 0 || std::abs(t - d.actTrigger[i]) > TRIGGER_MOVE) {
+                if (d.actTrigger[i] >= 0) active = true;
+                d.actTrigger[i] = t;
+            }
+        }
+    }
+    if (active) d.lastActivity = now;
 }
 
 void DeviceManager::UpdateStatsLocked(Device& d, TimePoint now) {
@@ -124,20 +222,52 @@ void DeviceManager::UpdateStatsLocked(Device& d, TimePoint now) {
     }
     const float dt = std::chrono::duration<float, std::milli>(now - d.lastPacket).count();
     d.lastPacket = now;
+    TrackInputGapsLocked(d, dt, now);
     if (d.intervalMs <= 0.f) {
         d.intervalMs = dt;
     } else {
-        d.jitterMs   += (std::abs(dt - d.intervalMs) - d.jitterMs) * STATS_SMOOTHING;
-        d.intervalMs += (dt - d.intervalMs) * STATS_SMOOTHING;
+        // One long gap counts as a bad packet, not as hundreds of ms of jitter:
+        // otherwise a single hiccup drops the connection ladder to the bottom.
+        const float sdt = std::min(dt, INPUT_GAP_MS);
+        d.jitterMs   += (std::abs(sdt - d.intervalMs) - d.jitterMs) * STATS_SMOOTHING;
+        d.intervalMs += (sdt - d.intervalMs) * STATS_SMOOTHING;
     }
 
     // Learn whether this controller streams continuously or only on change.
+    // A controller already proven continuous is not reclassified by a single
+    // hiccup (a rumble test or a Bluetooth scan can hold reports back for a
+    // few hundred ms): that takes a real silence, or long gaps that repeat.
+    if (d.streaming == Streaming::Continuous) {
+        const bool late = dt > std::max(d.intervalMs * 2.f, d.intervalMs + 12.f);
+        d.lateRatio  += ((late ? 1.f : 0.f) - d.lateRatio) * LINK_SMOOTHING;
+        d.jitterSlow += (d.jitterMs - d.jitterSlow) * LINK_SMOOTHING;
+        if (d.linkLevel == 0) {
+            d.linkLevel = RawLinkLevel(d.jitterSlow, d.lateRatio);
+            d.linkLevelAt = now;
+        } else if (now - d.linkLevelAt >= LINK_LEVEL_DWELL) {
+            const int up   = RawLinkLevel(d.jitterSlow * LINK_HYSTERESIS, d.lateRatio * LINK_HYSTERESIS);
+            const int down = RawLinkLevel(d.jitterSlow / LINK_HYSTERESIS, d.lateRatio / LINK_HYSTERESIS);
+            const int next = up > d.linkLevel ? d.linkLevel + 1 : down < d.linkLevel ? d.linkLevel - 1 : d.linkLevel;
+            if (next != d.linkLevel) { d.linkLevel = next; d.linkLevelAt = now; }
+        }
+    }
+
+    bool onChange = false;
     if (d.streaming != Streaming::OnChange && dt > ON_CHANGE_GAP_MS) {
+        onChange = d.streaming == Streaming::Measuring || dt > ON_CHANGE_SILENCE_MS;
+        if (!onChange) {
+            if (now - d.longGapWindow > ON_CHANGE_REPEAT_WINDOW) { d.longGapWindow = now; d.longGaps = 0; }
+            onChange = ++d.longGaps >= ON_CHANGE_REPEAT_GAPS;
+        }
+    }
+    if (onChange) {
         d.streaming = Streaming::OnChange;
+        d.linkLevel = 0;   // timing says nothing about such a controller
         Log(NameLocked(d.address, d.kind) + " reports only on change · silence watchdog disabled");
         if (d.slot) UpdateWatchdogLocked(d.slot);
     } else if (d.streaming == Streaming::Measuring && now - d.streamCheckStart > CONTINUOUS_PROOF) {
         d.streaming = Streaming::Continuous;
+        d.jitterSlow = d.jitterMs;   // start the ladder from what was measured so far
         if (d.slot) UpdateWatchdogLocked(d.slot);
     }
 }
@@ -161,7 +291,19 @@ void DeviceManager::UpdateBatteryLocked(Device& d, const std::vector<uint8_t>& r
     }
     // On the cable the charger lifts the voltage, so the estimate would climb
     // for no reason: freeze it until charging stops (see RefreshChargingLocked).
-    if (d.usbPendingSince != TimePoint{} || d.chargingShown) return;
+    if (d.usbPendingSince != TimePoint{} || d.chargingShown) {
+        // Diagnostics while charging over Bluetooth: raw voltage and battery
+        // current every 30 s, to learn how a full charge shows up in the
+        // reports (current tapering to ~0 at the top voltage?).
+        if (d.chargingShown && report.size() >= 0x23 && now - d.chargeLogAt >= std::chrono::seconds(30)) {
+            d.chargeLogAt = now;
+            char line[96];
+            std::snprintf(line, sizeof(line), ": charging · mV=%d I=%d", BatteryMillivolts(report),
+                          int(int16_t(report[0x21] | (report[0x22] << 8))));
+            Log(NameLocked(d.address, d.kind) + line);
+        }
+        return;
+    }
     if (d.batteryHoldUntil != TimePoint{}) {
         if (now < d.batteryHoldUntil) return;
         d.batteryHoldUntil = {};   // settled: measure from fresh readings
@@ -176,7 +318,7 @@ void DeviceManager::UpdateBatteryLocked(Device& d, const std::vector<uint8_t>& r
     if (d.batteryHistory.empty() || now - d.batteryHistory.back().first >= BATTERY_HISTORY_STEP) d.batteryHistory.emplace_back(now, d.batteryMv);
     while (!d.batteryHistory.empty() && now - d.batteryHistory.front().first > BATTERY_HISTORY_SPAN) d.batteryHistory.pop_front();
     const int pct = BatteryPercent(int(d.batteryMv));
-    UpdateDrainRateLocked(d, pct, now);
+    UpdateDrainRateLocked(d, now);
     if (pct >= 0 && pct <= BATTERY_LOW_PCT && !d.batteryWarned) {
         d.batteryWarned = true;
         char msg[160];
@@ -190,31 +332,81 @@ void DeviceManager::UpdateBatteryLocked(Device& d, const std::vector<uint8_t>& r
 
 // Measures how fast the battery actually drains in this session. Until there
 // is enough data the estimate falls back to Nintendo's rated battery life.
-void DeviceManager::UpdateDrainRateLocked(Device& d, int pct, TimePoint now) {
-    if (pct < 0) return;
-    if (d.drainRefPct < 0) {
-        if (d.streamCheckStart != TimePoint{} && now - d.streamCheckStart >= DRAIN_SETTLE) {
-            d.drainRefTime = now;
-            d.drainRefPct = pct;
+void DeviceManager::UpdateDrainRateLocked(Device& d, TimePoint now) {
+    using Hours = std::chrono::duration<float, std::ratio<3600>>;
+    using Secs  = std::chrono::duration<float>;
+    if (d.streamCheckStart == TimePoint{} || now - d.streamCheckStart < DRAIN_SETTLE) return;
+    const float pct = BatteryPercentF(d.batteryMv);
+    if (pct < 0.f) return;
+
+    // Slow level, time-based so it behaves the same at any report rate.
+    if (d.levelPct < 0.f || d.levelTime == TimePoint{}) {
+        d.levelPct = pct;
+    } else {
+        const float dt = Secs(now - d.levelTime).count();
+        d.levelPct += (pct - d.levelPct) * dt / (LEVEL_TAU_S + dt);
+    }
+    d.levelTime = now;
+
+    if (!d.drainSamples.empty() && now - d.drainSamples.back().first < DRAIN_SAMPLE_EVERY) return;
+    if (!d.drainSamples.empty() && now - d.drainSamples.back().first > DRAIN_MAX_GAP) d.drainSamples.clear();
+    if (!d.drainSamples.empty()) {
+        float lowest = d.drainSamples.front().second;
+        for (const auto& s : d.drainSamples) lowest = std::min(lowest, s.second);
+        if (d.levelPct >= lowest + DRAIN_JUMP_PCT) {   // charged without us noticing
+            d.drainSamples.clear();
+            d.drainPctPerHour = 0.f;
+            d.emptyAt = {};
         }
-        return;
     }
-    if (pct >= d.drainRefPct + CHARGING_RISE_PCT) {   // charging: start over
-        d.drainRefTime = now;
-        d.drainRefPct = pct;
-        d.drainPctPerHour = 0.f;
-        return;
+    d.drainSamples.emplace_back(now, d.levelPct);
+    while (now - d.drainSamples.front().first > DRAIN_WINDOW) d.drainSamples.pop_front();
+
+    // Least-squares slope (%/h) over the window.
+    if (d.drainSamples.size() >= 5 && now - d.drainSamples.front().first >= DRAIN_MIN_SPAN) {
+        const TimePoint t0 = d.drainSamples.front().first;
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        const double n = double(d.drainSamples.size());
+        for (const auto& [t, y] : d.drainSamples) {
+            const double x = Hours(t - t0).count();
+            sx += x; sy += y; sxx += x * x; sxy += x * y;
+        }
+        const double den = n * sxx - sx * sx;
+        if (den > 1e-9) {
+            const float rate = float(-(n * sxy - sx * sy) / den);
+            if (rate >= DRAIN_MIN_RATE) d.drainPctPerHour = rate;   // else: level recovering, keep the last rate
+        }
     }
-    const float hours = std::chrono::duration<float, std::ratio<3600>>(now - d.drainRefTime).count();
-    const int drop = d.drainRefPct - pct;
-    if (hours >= DRAIN_MIN_HOURS && drop >= DRAIN_MIN_DROP_PCT) d.drainPctPerHour = drop / hours;
+
+    // Project the moment it runs out and ease towards it, so the shown time
+    // counts down minute by minute instead of jumping.
+    const float rated = RatedHours(d.kind);
+    float rate = d.drainPctPerHour > 0.f ? d.drainPctPerHour : rated > 0.f ? 100.f / rated : 0.f;
+    if (rate <= 0.f) return;
+    if (rated > 0.f) rate = std::max(rate, 100.f / (rated * DRAIN_MAX_LIFE));
+    const float target = d.levelPct / rate;   // hours
+    if (d.emptyAt == TimePoint{} || d.emptyAt <= now) {
+        d.emptyAt = now + std::chrono::duration_cast<Clock::duration>(Hours(target));
+    } else {
+        const float left = Hours(d.emptyAt - now).count();
+        d.emptyAt = now + std::chrono::duration_cast<Clock::duration>(Hours(left + (target - left) * ETA_EASE));
+    }
 }
 
-int DeviceManager::MinutesLeft(const Device& d, int pct, bool& measured) {
+void DeviceManager::ResetDrainLocked(Device& d) {
+    d.levelPct = -1.f;
+    d.levelTime = {};
+    d.drainSamples.clear();
+    d.drainPctPerHour = 0.f;
+    d.emptyAt = {};
+}
+
+int DeviceManager::MinutesLeft(const Device& d, int pct, TimePoint now, bool& measured) {
     measured = d.drainPctPerHour > 0.f;
     if (pct < 0) return -1;
-    if (measured) return int(pct / d.drainPctPerHour * 60.f);
-    const float rated = RatedHours(d.kind);
+    if (d.emptyAt != TimePoint{})
+        return std::max(0, int(std::chrono::duration_cast<std::chrono::minutes>(d.emptyAt - now).count()));
+    const float rated = RatedHours(d.kind);   // first seconds after connecting
     return rated > 0.f ? int(pct / 100.f * rated * 60.f) : -1;
 }
 

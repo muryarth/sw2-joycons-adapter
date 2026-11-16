@@ -87,6 +87,8 @@ int BatteryMillivolts(const std::vector<uint8_t>& buf);
 // Nintendo's Joy-Con thresholds are shifted down (community measurement:
 // ~3.30 V shows 75% and ~3.60 V shows 100% on a Switch 2). Approximate.
 int BatteryPercent(int millivolts);
+// Same curve without rounding (-1 = unknown), for rate estimates.
+float BatteryPercentF(float millivolts);
 
 // Right Joy-Con button bits (in JoyConButtonState(buf, false))
 constexpr uint32_t JC_R_R     = 0x004000;
@@ -107,6 +109,14 @@ Ds4Report BuildSingleJoyConReport(const std::vector<uint8_t>& buf, bool isLeft,
 Ds4Report BuildDualJoyConReport(const std::vector<uint8_t>& left, const std::vector<uint8_t>& right,
                                     const StickCalibration& calL, const StickCalibration& calR,
                                     const StickTuning& tune, bool leftDpadAsDpad, GyroSource gyro);
+
+// Raw motion sensors of one controller (gyroscope and accelerometer, three
+// axes each). False when the report carries no motion data.
+bool ExtractMotion(const std::vector<uint8_t>& buf, int16_t gyro[3], int16_t accel[3]);
+
+// Pro Controller 2 back buttons (GL/GR), as physically pressed: the virtual
+// controller only carries what they are mapped to.
+void ProBackButtons(const std::vector<uint8_t>& buf, bool& gl, bool& gr);
 
 Ds4Report BuildProReport(const std::vector<uint8_t>& buf, const StickCalibration& calL,
                              const StickCalibration& calR, const StickTuning& tune,

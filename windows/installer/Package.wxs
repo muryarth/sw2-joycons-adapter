@@ -4,6 +4,8 @@
   - Per-machine install, folder chosen by the user (default: Program Files\SW2 Adapter)
   - Start menu shortcut, always (makes the app findable from Windows search)
   - Optional desktop shortcut (checkbox, page after the folder page)
+  - Optional "Start with Windows" (checkbox, same page, off by default): the
+    same HKCU Run value the app's Settings toggle writes (platform/Autostart.cpp)
   - Major upgrade: a newer MSI replaces the installed version in place;
     installing an older one over a newer one is refused.
 
@@ -39,6 +41,8 @@
 
     <!-- Desktop shortcut checkbox: on by default -->
     <Property Id="DESKTOPSHORTCUT" Value="1" />
+    <!-- Start with Windows checkbox: off by default (no Value = unchecked) -->
+    <Property Id="AUTOSTART" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="SW2 Adapter" />
@@ -70,12 +74,19 @@
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
+      <!-- Start with Windows, hidden in the notification area. Per-user value
+           (the app turns it on/off from Settings without admin rights). -->
+      <Component Id="Autostart" Condition="AUTOSTART = 1">
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="SW2 Adapter"
+                       Type="string" Value="&quot;[#AppExe]&quot; --tray" KeyPath="yes" />
+      </Component>
+
       <Component Id="LicenseFile">
         <File Id="LicenseTxt" Source="$(RepoDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
-    <!-- UI: Welcome → License → Folder → Shortcuts → Ready -->
+    <!-- UI: Welcome → License → Folder → Shortcuts and startup → Ready -->
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
     <WixVariable Id="WixUIBannerBmp" Value="$(ArtDir)\banner.bmp" />
     <WixVariable Id="WixUIDialogBmp" Value="$(ArtDir)\dialog.bmp" />
@@ -86,10 +97,12 @@
       <Dialog Id="ShortcutDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
         <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
-        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts" />
-        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where [ProductName] should appear." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts and startup" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where [ProductName] appears and how it starts." />
         <Control Id="StartMenuInfo" Type="Text" X="20" Y="60" Width="330" Height="28" NoPrefix="yes" Text="A Start menu shortcut is always created, so you can find [ProductName] by typing its name in Windows search." />
         <Control Id="DesktopCheck" Type="CheckBox" X="20" Y="96" Width="330" Height="17" Property="DESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+        <Control Id="AutostartCheck" Type="CheckBox" X="20" Y="120" Width="330" Height="17" Property="AUTOSTART" CheckBoxValue="1" Text="&amp;Start [ProductName] with Windows (runs in the notification area)" />
+        <Control Id="AutostartInfo" Type="Text" X="37" Y="138" Width="313" Height="28" NoPrefix="yes" Text="You can change this later in the app: Settings &gt; Windows." />
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
           <Publish Event="NewDialog" Value="InstallDirDlg" />

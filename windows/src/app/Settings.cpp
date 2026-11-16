@@ -88,6 +88,12 @@ AppSettings LoadSettings() {
         s.heartbeatMs    = std::clamp(j.value("heartbeatMs", s.heartbeatMs), 0, 50);
         s.watchdogMs     = std::clamp(j.value("watchdogMs", s.watchdogMs), 0, 2000);
         s.dsuServer      = j.value("dsuServer", s.dsuServer);
+        s.closeToTray    = j.value("closeToTray", s.closeToTray);
+        s.idleDisconnectMin = std::clamp(j.value("idleDisconnectMin", s.idleDisconnectMin), 0, 240);
+        // The choices are 5/15/30/60: a value saved by an older build (10, 20)
+        // moves to the next one up.
+        if (s.idleDisconnectMin > 0)
+            s.idleDisconnectMin = s.idleDisconnectMin <= 5 ? 5 : s.idleDisconnectMin <= 15 ? 15 : s.idleDisconnectMin <= 30 ? 30 : 60;
 
         for (const auto& d : j.value("knownControllers", json::array())) {
             DeviceProfile p;
@@ -102,6 +108,11 @@ AppSettings LoadSettings() {
             p.input.mapping.dpadAsDpad    = in.value("dpadAsDpad", p.input.mapping.dpadAsDpad);
             p.input.mapping.remapSideways = in.value("remapSideways", p.input.mapping.remapSideways);
             p.input.mouseEnabled = in.value("mouseEnabled", p.input.mouseEnabled);
+            // Older builds had one global choice for Joy-Con pairs (average /
+            // left / right): carry it over to the per-controller switch once.
+            p.input.gyro = in.contains("gyro") ? in.value("gyro", true)
+                         : !((p.kind == ControllerKind::JoyConL && s.gyroSource == GyroSource::Right) ||
+                             (p.kind == ControllerKind::JoyConR && s.gyroSource == GyroSource::Left));
             p.input.gl = EnumFrom(in, "gl", p.input.gl, int(ButtonMapping::Count) - 1);
             p.input.gr = EnumFrom(in, "gr", p.input.gr, int(ButtonMapping::Count) - 1);
             // v1 -> v2: GL/GR "None" (the old default) becomes the stick clicks.
@@ -129,6 +140,7 @@ bool SaveSettings(const AppSettings& s) {
                 {"remapSideways", p.input.mapping.remapSideways},
                 {"mouseEnabled", p.input.mouseEnabled},
                 {"gl", static_cast<int>(p.input.gl)}, {"gr", static_cast<int>(p.input.gr)},
+                {"gyro", p.input.gyro},
             }},
         });
     }
@@ -136,11 +148,13 @@ bool SaveSettings(const AppSettings& s) {
         {"version", 2},
         {"language", s.language},
         {"autoSearch", s.autoSearch}, {"combineJoyCons", s.combineJoyCons}, {"swapABXY", s.swapABXY},
-        {"deadzone", s.deadzone}, {"gyroSource", static_cast<int>(s.gyroSource)},
+        {"deadzone", s.deadzone},
         {"sounds", s.sounds}, {"volume", s.volume},
         {"updatePolicy", static_cast<int>(s.updatePolicy)},
         {"heartbeatMs", s.heartbeatMs}, {"watchdogMs", s.watchdogMs},
         {"dsuServer", s.dsuServer},
+        {"closeToTray", s.closeToTray},
+        {"idleDisconnectMin", s.idleDisconnectMin},
         {"knownControllers", known},
     };
     std::error_code ec;

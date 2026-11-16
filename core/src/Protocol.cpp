@@ -318,18 +318,23 @@ int BatteryMillivolts(const std::vector<uint8_t>& b) {
     return (mv >= 2000 && mv <= 4800) ? mv : 0;   // ignore garbage / absent field
 }
 
-int BatteryPercent(int mv) {
-    if (mv <= 0) return -1;
-    struct Pt { int mv; int pct; };
+float BatteryPercentF(float mv) {
+    if (mv <= 0.f) return -1.f;
+    struct Pt { float mv; float pct; };
     static const Pt curve[] = {{2700, 0}, {3000, 25}, {3160, 50}, {3300, 75}, {3600, 100}};
-    if (mv <= curve[0].mv) return 0;
+    if (mv <= curve[0].mv) return 0.f;
     for (size_t i = 1; i < std::size(curve); ++i) {
         if (mv <= curve[i].mv) {
-            const float t = float(mv - curve[i - 1].mv) / float(curve[i].mv - curve[i - 1].mv);
-            return int(std::lround(curve[i - 1].pct + t * (curve[i].pct - curve[i - 1].pct)));
+            const float t = (mv - curve[i - 1].mv) / (curve[i].mv - curve[i - 1].mv);
+            return curve[i - 1].pct + t * (curve[i].pct - curve[i - 1].pct);
         }
     }
-    return 100;
+    return 100.f;
+}
+
+int BatteryPercent(int mv) {
+    if (mv <= 0) return -1;
+    return int(std::lround(BatteryPercentF(float(mv))));
 }
 
 std::pair<int16_t, int16_t> OpticalSensor(const std::vector<uint8_t>& b) {
@@ -388,6 +393,21 @@ Ds4Report BuildDualJoyConReport(const std::vector<uint8_t>& left, const std::vec
     }
     ApplyMotion(r, m);
     return r;
+}
+
+bool ExtractMotion(const std::vector<uint8_t>& b, int16_t gyro[3], int16_t accel[3]) {
+    const Motion m = DecodeMotion(b);
+    gyro[0] = m.gx; gyro[1] = m.gy; gyro[2] = m.gz;
+    accel[0] = m.ax; accel[1] = m.ay; accel[2] = m.az;
+    return m.gx || m.gy || m.gz || m.ax || m.ay || m.az;
+}
+
+void ProBackButtons(const std::vector<uint8_t>& b, bool& gl, bool& gr) {
+    gl = gr = false;
+    if (b.size() < MIN_REPORT_SIZE) return;
+    const uint64_t s = ProState(b);
+    gl = (s & P_GL) != 0;
+    gr = (s & P_GR) != 0;
 }
 
 Ds4Report BuildProReport(const std::vector<uint8_t>& b, const StickCalibration& calL,

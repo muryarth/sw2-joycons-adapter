@@ -15,6 +15,7 @@ namespace sw2::ui {
 
 theme::Fonts g_fonts;
 float g_dpiScale = 1.f;
+bool  g_animating = false;
 
 using namespace theme;
 
@@ -73,6 +74,14 @@ bool Toggle(const char* id, bool* value) {
     return clicked;
 }
 
+float ButtonFitWidth(const char* label, const char* glyph, float padding) {
+    ImGui::PushFont(g_fonts.semibold, SIZE_BODY - 1.f);
+    const float ts = ImGui::CalcTextSize(label, ImGui::FindRenderedTextEnd(label)).x;
+    const float gs = glyph ? ImGui::CalcTextSize(glyph).x : 0.f;
+    ImGui::PopFont();
+    return ts + gs + (glyph && ts > 0 ? Dp(8.f) : 0.f) + Dp(padding);
+}
+
 bool Button(const char* label, ButtonStyle style, ImVec2 size, const char* glyph) {
     ImGui::PushID(label);
     const char* text = label;                                // visible part ends at "##"
@@ -117,10 +126,22 @@ bool Button(const char* label, ButtonStyle style, ImVec2 size, const char* glyph
     dl->AddRectFilled(a, b, fill, rounding);
     if (outline) dl->AddRect(a, b, A(LerpColor(outline, style == ButtonStyle::Danger ? Rgb(DANGER, 0.8f) : Rgb(0xFFFFFF, 0.22f), hv)), rounding, 0, 1.f);
 
-    const float cx = p.x + (w - contentW) * 0.5f;
-    const float fontH = ImGui::GetFontSize();
-    if (glyph) DrawIconCentered(dl, {cx + gs.x * 0.5f, p.y + h * 0.5f}, 13.f, fg, glyph);
-    if (ts.x > 0) dl->AddText({cx + gs.x + gap, p.y + (h - fontH) * 0.5f}, fg, text, textEnd);
+    const float cx = p.x + (w - contentW) * 0.5f, cy = p.y + h * 0.5f;
+    if (glyph) {
+        // Icon centred by its ink. On primary buttons it is drawn twice, a
+        // hair apart, for a bolder stroke (the icon font has one weight only).
+        const bool strong = style == ButtonStyle::Primary;
+        const float size = strong ? 14.f : 13.f;
+        if (strong) DrawIconCentered(dl, {cx + gs.x * 0.5f + Dp(0.6f), cy}, size, fg, glyph);
+        DrawIconCentered(dl, {cx + gs.x * 0.5f, cy}, size, fg, glyph);
+    }
+    if (ts.x > 0) {
+        // Centre the label by the ink of its capitals (the line box also
+        // reserves descender space, which made labels sit off the icon).
+        float ty = p.y + (h - ImGui::GetFontSize()) * 0.5f;
+        if (const ImFontGlyph* g = ImGui::GetFontBaked()->FindGlyph('H')) ty = cy - (g->Y0 + g->Y1) * 0.5f;
+        dl->AddText({cx + gs.x + gap, std::round(ty)}, fg, text, textEnd);
+    }
     ImGui::PopFont();
     if (hovered && !disabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ImGui::PopID();
@@ -266,28 +287,112 @@ void TextCentered(ImFont* font, float size, unsigned color, const char* text) {
     ImGui::PopFont();
 }
 
-void SectionTitle(const char* text, bool first) {
-    if (!first) ImGui::Dummy({0, Dp(12.f)});   // groups breathe more than items inside them
+void SectionTitle(const char* text, bool first, const char* waiting) {
+    // Compact rhythm: a small gap above the title, none below it beyond the
+    // regular item spacing, so the title clearly belongs to its card.
+    if (first) ImGui::SetCursorPosY(ImGui::GetCursorPosY() - Dp(4.f));
+    else       ImGui::Dummy({0, Dp(2.f)});
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + Dp(4.f));
     ImGui::PushFont(g_fonts.semibold, SIZE_H2 - 1.f);
-    ImGui::PushStyleColor(ImGuiCol_Text, Rgb4(FAINT));
+    ImGui::PushStyleColor(ImGuiCol_Text, Rgb4(MUTED));
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
+    const ImVec2 tmin = ImGui::GetItemRectMin(), tmax = ImGui::GetItemRectMax();
+    float cy = (tmin.y + tmax.y) * 0.5f;   // centre on the ink of the capitals
+    if (const ImFontGlyph* g = ImGui::GetFontBaked()->FindGlyph('S')) cy = tmin.y + (g->Y0 + g->Y1) * 0.5f;
     ImGui::PopFont();
-    ImGui::Dummy({0, Dp(0.f)});
+    if (waiting) {
+        g_animating = true;
+        // Right-aligned on the title line: three dots in a soft wave, then the
+        // note. Reads as "in progress", calm enough to sit there for a while.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGui::PushFont(g_fonts.semibold, SIZE_SMALL - 1.f);
+        const ImVec2 ws = ImGui::CalcTextSize(waiting);
+        float ty = cy - ws.y * 0.5f;
+        if (const ImFontGlyph* g = ImGui::GetFontBaked()->FindGlyph('x')) ty = cy - (g->Y0 + g->Y1) * 0.5f;
+        const float tx = right - Dp(4.f) - ws.x;
+        dl->AddText({std::round(tx), std::round(ty)}, Rgb(ACCENT, 0.9f), waiting);
+        ImGui::PopFont();
+        const float r = Dp(2.2f), step = Dp(7.f), t = float(ImGui::GetTime());
+        const float x0 = tx - Dp(8.f) - r - step * 2;
+        for (int i = 0; i < 3; ++i) {
+            const float ph = 0.5f + 0.5f * std::sin(t * 4.5f - i * 0.9f);
+            dl->AddCircleFilled({x0 + i * step, cy - ph * Dp(1.5f)}, r, Rgb(ACCENT, 0.3f + 0.7f * ph));
+        }
+    }
+}
+
+bool TextEllipsis(ImFont* font, float size, unsigned color, const char* text, float maxWidth) {
+    ImGui::PushFont(font, size);
+    std::string shown = text;
+    bool cut = false;
+    if (maxWidth > 0.f && ImGui::CalcTextSize(text).x > maxWidth) {
+        cut = true;
+        const char* ell = "…";   // "..." (ellipsis)
+        const float ellW = ImGui::CalcTextSize(ell).x;
+        size_t n = std::strlen(text);
+        while (n > 0) {
+            do { --n; } while (n > 0 && (static_cast<unsigned char>(text[n]) & 0xC0) == 0x80);   // whole UTF-8 characters
+            if (ImGui::CalcTextSize(text, text + n).x + ellW <= maxWidth) break;
+        }
+        shown.assign(text, n);
+        while (!shown.empty() && (shown.back() == ' ' || shown.back() == '.')) shown.pop_back();
+        // Don't end on a dangling separator ("Connected ·…").
+        if (shown.size() >= 2 && shown.compare(shown.size() - 2, 2, "\xC2\xB7") == 0) shown.resize(shown.size() - 2);
+        while (!shown.empty() && shown.back() == ' ') shown.pop_back();
+        shown += ell;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, Rgb4(color));
+    ImGui::TextUnformatted(shown.c_str());
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+    if (cut && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+    return cut;
+}
+
+unsigned KindColor(ControllerKind kind) {
+    switch (kind) {
+        case ControllerKind::JoyConL: return JOYCON_L;
+        case ControllerKind::JoyConR: return JOYCON_R;
+        default:                      return ACCENT;
+    }
+}
+
+int SignalLevelFromRssi(int rssi) {
+    return rssi == 0 ? 0 : rssi > -60 ? 4 : rssi > -70 ? 3 : rssi > -80 ? 2 : 1;
+}
+
+const char* SignalWord(int level) {
+    switch (level) {
+        case 4:  return tr("excellent", "excelente");
+        case 3:  return tr("good", "bom");
+        case 2:  return tr("fair", "razoável");
+        case 1:  return tr("weak", "fraco");
+        default: return tr("unknown", "desconhecido");
+    }
 }
 
 void Spinner(float radius, unsigned color) {
+    g_animating = true;   // keeps the frame rate up while it is on screen
     const float r = Dp(radius);
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::Dummy({r * 2, r * 2});
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float t = float(ImGui::GetTime()) * 6.f;
+    const float t = float(ImGui::GetTime());
     const ImVec2 c = {p.x + r, p.y + r};
-    dl->AddCircle(c, r - Dp(1.5f), Rgb(color, 0.15f), 24, Dp(2.f));
+    const float rr = r - Dp(1.5f), th = Dp(2.2f);
+    dl->AddCircle(c, rr, Rgb(color, 0.15f), 48, th);
+    // Steady rotation plus an arc that gently grows and shrinks: smooth at
+    // any frame rate, no visible stepping.
+    const float head = t * 5.f;
+    const float len = 1.4f + 1.0f * std::sin(t * 2.2f);
     dl->PathClear();
-    dl->PathArcTo(c, r - Dp(1.5f), t, t + 2.2f, 24);
-    dl->PathStroke(Rgb(color), 0, Dp(2.f));
+    dl->PathArcTo(c, rr, head, head + len, 40);
+    dl->PathStroke(Rgb(color), 0, th);
+    // Round the ends so the arc does not look cut.
+    dl->AddCircleFilled({c.x + std::cos(head) * rr, c.y + std::sin(head) * rr}, th * 0.5f, Rgb(color), 12);
+    dl->AddCircleFilled({c.x + std::cos(head + len) * rr, c.y + std::sin(head + len) * rr}, th * 0.5f, Rgb(color), 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,8 +460,7 @@ void AppLogo(ImDrawList* dl, ImVec2 o, float size) {
     dl->AddCircleFilled(P(194, 182), 6 * k, bg);
 }
 
-void SignalBars(ImDrawList* dl, ImVec2 bl, float height, int16_t rssi, unsigned color) {
-    const int level = rssi == 0 ? 0 : rssi > -60 ? 4 : rssi > -70 ? 3 : rssi > -80 ? 2 : 1;
+void SignalBars(ImDrawList* dl, ImVec2 bl, float height, int level, unsigned color) {
     const float bw = height * 0.18f, gap = height * 0.1f;
     for (int i = 0; i < 4; ++i) {
         const float bh = height * (0.35f + 0.65f * (i / 3.f));
@@ -382,10 +486,9 @@ void DrawIconCentered(ImDrawList* dl, ImVec2 center, float size, ImU32 color, co
         return;
     }
     if (std::strcmp(glyph, icon::Back) == 0) {
-        const float kk = k * 1.3f, hd = k;
-        dl->AddLine({c.x - kk, c.y}, {c.x + kk, c.y}, color, th);
-        const ImVec2 head[3] = {{c.x - kk + hd, c.y - hd}, {c.x - kk, c.y}, {c.x - kk + hd, c.y + hd}};
-        dl->AddPolyline(head, 3, color, ImDrawFlags_None, th);
+        // The details chevron, mirrored: one caret style for "into" and "back".
+        const ImVec2 pts[3] = {{c.x + k * 0.45f, c.y - k}, {c.x - k * 0.55f, c.y}, {c.x + k * 0.45f, c.y + k}};
+        dl->AddPolyline(pts, 3, color, ImDrawFlags_None, th);
         return;
     }
     ImFont* f = g_fonts.regular ? g_fonts.regular : ImGui::GetFont();
@@ -406,28 +509,43 @@ void DrawIconCentered(ImDrawList* dl, ImVec2 center, float size, ImU32 color, co
 }
 
 namespace {
-constexpr float BATTERY_ICON_W = 20.f, BATTERY_NUB_W = 2.5f, BATTERY_TEXT_GAP = 6.f;
-// pct < 0 while charging: the level is unknown over USB, so the label says so.
-std::string BatteryLabel(int pct, bool charging) {
-    if (pct < 0) return charging ? tr("Charging", "Carregando") : "";
-    char b[16];
-    std::snprintf(b, sizeof(b), "≈%d%%", pct);
-    return b;
+// Solid, rounded ("cozy") battery: a tinted track, a solid fill for the level
+// and the percentage in bold white on top, readable on every fill colour.
+constexpr float BATTERY_SIDE_PAD = 3.f, BATTERY_ICON_H = 14.f, BATTERY_NUB_W = 2.5f, BATTERY_TEXT_GAP = 7.f;
+constexpr float BATTERY_PCT_SIZE = SIZE_SMALL - 2.f;   // as large as "100%" allows inside the body
+// The label is only for charging (the level is unknown over USB, so the label says so).
+std::string BatteryLabel(bool charging) { return charging ? tr("Charging", "Carregando") : ""; }
+// While charging, the label ends in "…" that fills in one dot at a time
+// (".", "..", "..."). Its width always reserves three dots so nothing jumps.
+constexpr const char* CHARGING_DOTS = "...";
+std::string LayoutLabel(bool charging) { return charging ? BatteryLabel(true) + CHARGING_DOTS : std::string(); }
+std::string SuffixLabel(const char* suffix, bool afterLabel) {
+    if (!suffix || !*suffix) return {};
+    return afterLabel ? std::string(" · ") + suffix : std::string(suffix);
 }
-std::string SuffixLabel(const char* suffix) { return suffix && *suffix ? std::string(" · ") + suffix : std::string(); }
+unsigned BatteryFill(int pct) { return pct < 20 ? BATTERY_LOW : pct < 50 ? BATTERY_MID : BATTERY_OK; }
+// Body as wide as "100%" plus a little padding on each side: every level fits
+// without the body being wider than it needs to be.
+float BatteryBodyWidth() {
+    ImGui::PushFont(g_fonts.bold ? g_fonts.bold : g_fonts.semibold, BATTERY_PCT_SIZE);
+    const float w = ImGui::CalcTextSize("100%").x;
+    ImGui::PopFont();
+    return std::round(w + Dp(BATTERY_SIDE_PAD) * 2.f);
+}
 }
 
 float BatteryInlineWidth(int pct, const char* suffix, bool charging) {
     if (pct < 0 && !charging) return 0.f;
+    const std::string label = LayoutLabel(charging), extra = SuffixLabel(suffix, !label.empty());
     ImGui::PushFont(g_fonts.semibold, SIZE_SMALL);
-    float w = ImGui::CalcTextSize(BatteryLabel(pct, charging).c_str()).x;
+    float w = ImGui::CalcTextSize(label.c_str()).x;
     ImGui::PopFont();
-    if (const std::string s = SuffixLabel(suffix); !s.empty()) {
+    if (!extra.empty()) {
         ImGui::PushFont(g_fonts.regular, SIZE_SMALL);
-        w += ImGui::CalcTextSize(s.c_str()).x;
+        w += ImGui::CalcTextSize(extra.c_str()).x;
         ImGui::PopFont();
     }
-    return Dp(BATTERY_ICON_W) + Dp(BATTERY_NUB_W) + Dp(BATTERY_TEXT_GAP) + w;
+    return BatteryBodyWidth() + Dp(BATTERY_NUB_W) + (w > 0.f ? Dp(BATTERY_TEXT_GAP) + w : 0.f);
 }
 
 float BadgeWidth(const char* text) {
@@ -478,54 +596,136 @@ unsigned BatteryColor(int pct) {
     return pct < 20 ? DANGER : pct < 50 ? WARNING : SUCCESS;
 }
 
+void Segments(std::initializer_list<Seg> segs) {
+    ImGui::BeginGroup();
+    bool firstSeg = true;
+    for (const Seg& sg : segs) {
+        if (!firstSeg) ImGui::SameLine(0, 0);
+        firstSeg = false;
+        ImGui::PushFont(sg.strong ? g_fonts.semibold : g_fonts.regular, SIZE_SMALL);
+        ImGui::PushStyleColor(ImGuiCol_Text, Rgb4(sg.color));
+        ImGui::TextUnformatted(sg.text);
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+    }
+    ImGui::EndGroup();
+}
+
+void BatteryTooltip(int pct, const char* remaining, int millivolts, const char* note) {
+    if (!ImGui::BeginTooltip()) return;
+    const unsigned col = BatteryColor(pct), fill = BatteryFill(pct);
+    const float w = Dp(note ? 250.f : 200.f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // "90%" as the headline, the caption on its baseline.
+    char num[8];
+    std::snprintf(num, sizeof(num), "%d%%", std::clamp(pct, 0, 100));
+    ImGui::PushFont(g_fonts.bold ? g_fonts.bold : g_fonts.semibold, SIZE_TITLE + 4.f);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 ns = ImGui::CalcTextSize(num);
+    const float big = ImGui::GetFontSize();
+    dl->AddText(p, Rgb(col), num);
+    ImGui::PopFont();
+    ImGui::PushFont(g_fonts.regular, SIZE_SMALL);
+    const float small = ImGui::GetFontSize();
+    dl->AddText({p.x + ns.x + Dp(8.f), p.y + (big - small) * 0.80f}, Rgb(MUTED), tr("estimated battery", "bateria estimada"));
+    ImGui::PopFont();
+    ImGui::Dummy({w, ns.y});
+
+    // Level bar.
+    const ImVec2 b = ImGui::GetCursorScreenPos();
+    const float bh = Dp(5.f);
+    dl->AddRectFilled(b, {b.x + w, b.y + bh}, Rgb(fill, 0.25f), bh * 0.5f);
+    dl->AddRectFilled(b, {b.x + std::max(w * std::clamp(pct, 0, 100) / 100.f, bh), b.y + bh}, Rgb(fill), bh * 0.5f);
+    ImGui::Dummy({w, bh + Dp(4.f)});
+
+    if (remaining && remaining[0]) Segments({{tr("about ", "cerca de "), FAINT}, {remaining, TEXT, true}, {tr(" left", " restantes"), FAINT}});
+    TextSmall(FAINT, "%.2f V", millivolts / 1000.f);
+    if (note) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+        TextSmall(MUTED, "%s", note);
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndTooltip();
+}
+
 void BatteryInline(int pct, const char* suffix, bool charging, bool iconRight) {
     if (pct < 0 && !charging) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const std::string label = BatteryLabel(pct, charging), extra = SuffixLabel(suffix);
-    const unsigned col = charging ? SUCCESS : BatteryColor(pct);
+    const std::string label = BatteryLabel(charging), extra = SuffixLabel(suffix, !label.empty());
+    const unsigned col = charging ? SUCCESS : BatteryColor(pct);       // label text
+    const unsigned fill = charging ? BATTERY_OK : BatteryFill(pct);    // icon
 
     ImGui::PushFont(g_fonts.semibold, SIZE_SMALL);
-    const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+    const ImVec2 ts = ImGui::CalcTextSize(LayoutLabel(charging).c_str());   // reserves the three dots
     const float lineH = ImGui::GetTextLineHeight();
     ImGui::PopFont();
     ImGui::PushFont(g_fonts.regular, SIZE_SMALL);
     const float extraW = extra.empty() ? 0.f : ImGui::CalcTextSize(extra.c_str()).x;
     ImGui::PopFont();
 
-    const float bw = Dp(BATTERY_ICON_W), bh = Dp(10.f), nub = Dp(BATTERY_NUB_W), gapW = Dp(BATTERY_TEXT_GAP);
-    const float textW = ts.x + extraW, iconW = bw + nub;
+    const float bw = BatteryBodyWidth(), bh = Dp(BATTERY_ICON_H), nub = Dp(BATTERY_NUB_W);
+    const float textW = ts.x + extraW, iconW = bw + nub, gapW = textW > 0.f ? Dp(BATTERY_TEXT_GAP) : 0.f;
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float cy = p.y + lineH * 0.5f + Dp(1.f);
-    const float iconX = iconRight ? p.x + textW + gapW : p.x;
+    const float cy = std::round(p.y + lineH * 0.5f + Dp(1.f));
+    const float iconX = std::round(iconRight ? p.x + textW + gapW : p.x);
     const float textX = iconRight ? p.x : p.x + iconW + gapW;
 
-    // ---- icon: body, terminal cap, level (or charging bolt) ----
+    // ---- icon: track, solid level, rounded cap ----
     const ImVec2 a = {iconX, cy - bh * 0.5f}, z = {iconX + bw, cy + bh * 0.5f};
-    dl->AddRect(a, z, Rgb(col), Dp(3.f), 0, Dp(1.3f));
-    // The cap touches the body and is rounded only on its outer side.
-    dl->AddRectFilled({z.x - Dp(0.5f), cy - bh * 0.24f}, {z.x + nub, cy + bh * 0.24f}, Rgb(col), Dp(1.f),
-                      ImDrawFlags_RoundCornersRight);
+    const float round = bh * 0.32f;
+    const float level = charging ? 1.f : std::clamp(pct / 100.f, 0.f, 1.f);
+    dl->AddRectFilled(a, z, Rgb(fill, 0.30f), round);
+    if (level > 0.f) {   // the fill keeps the body's rounding on the left and a straight edge on the right
+        dl->PushClipRect(a, {a.x + std::max(bw * level, Dp(3.f)), z.y}, true);
+        dl->AddRectFilled(a, z, Rgb(fill), round);
+        dl->PopClipRect();
+    }
+    dl->AddRectFilled({z.x + Dp(1.f), cy - bh * 0.20f}, {z.x + nub, cy + bh * 0.20f},
+                      Rgb(fill, level >= 0.995f ? 1.f : 0.55f), Dp(1.5f), ImDrawFlags_RoundCornersRight);
     if (charging) {
-        // Full body with a lightning bolt cut out of it (phone style), drawn as
-        // two triangles in the card colour.
-        dl->AddRectFilled({a.x + Dp(2.f), a.y + Dp(2.f)}, {z.x - Dp(2.f), z.y - Dp(2.f)}, Rgb(col), Dp(1.5f));
-        const float h = bh - Dp(1.f), w = h * 0.62f, x0 = (a.x + z.x) * 0.5f - w * 0.5f, y0 = cy - h * 0.5f;
+        // White lightning bolt on the full body: one concave shape (two
+        // overlapping triangles left anti-aliased seams inside it) on whole
+        // pixels, so its edges stay crisp.
+        // Sized to the body, with a waist wide enough to stay solid white.
+        const float h = std::round(bh - Dp(4.f)), w = std::round(h * 0.78f);   // same margin above and below
+        const float x0 = std::round((a.x + z.x - w) * 0.5f), y0 = a.y + std::round((bh - h) * 0.5f);
         auto P = [&](float u, float t) { return ImVec2(x0 + u * w, y0 + t * h); };
-        const ImU32 c = Rgb(SURFACE);
-        dl->AddTriangleFilled(P(0.70f, 0.f), P(0.05f, 0.58f), P(0.55f, 0.58f), c);
-        dl->AddTriangleFilled(P(0.45f, 0.42f), P(0.95f, 0.42f), P(0.30f, 1.f), c);
+        // Clockwise on screen: the anti-aliased fringe is built for that winding
+        // (the other way round it grows inwards and the edges come out jagged).
+        // Blunt top (a needle point vanishes at this size), pointed bottom tip.
+        const ImVec2 bolt[] = {P(0.48f, 0.00f), P(0.84f, 0.00f), P(0.62f, 0.38f), P(1.00f, 0.38f),
+                               P(0.22f, 1.00f), P(0.40f, 0.62f), P(0.00f, 0.62f)};
+        dl->AddConcavePolyFilled(bolt, 7, Rgb(0xFFFFFF));
     } else {
-        const float inner = (bw - Dp(4.f)) * std::clamp(pct / 100.f, 0.f, 1.f);
-        if (inner > 0.5f) dl->AddRectFilled({a.x + Dp(2.f), a.y + Dp(2.f)}, {a.x + Dp(2.f) + inner, z.y - Dp(2.f)}, Rgb(col), Dp(1.5f));
+        // "90%" in bold white, with a soft shadow for contrast on light fills.
+        char num[8];
+        std::snprintf(num, sizeof(num), "%d%%", std::clamp(pct, 0, 100));
+        ImGui::PushFont(g_fonts.bold ? g_fonts.bold : g_fonts.semibold, BATTERY_PCT_SIZE);
+        const ImVec2 ns = ImGui::CalcTextSize(num);
+        float ny = cy - ns.y * 0.5f;
+        if (const ImFontGlyph* g = ImGui::GetFontBaked()->FindGlyph('8')) ny = cy - (g->Y0 + g->Y1) * 0.5f;
+        const ImVec2 at = {std::round((a.x + z.x - ns.x) * 0.5f), std::round(ny)};
+        dl->AddText({at.x, at.y + Dp(1.f)}, Rgb(0x000000, 0.28f), num);
+        dl->AddText(at, Rgb(0xFFFFFF), num);
+        ImGui::PopFont();
     }
 
-    // ---- text: level in the battery colour, extra info faint ----
+    // ---- text: charging label in the battery colour, extra info faint ----
     // Centred on the icon by the digits' ink (not the line box, which also
     // reserves room for descenders and would sit the text low).
     ImGui::PushFont(g_fonts.semibold, SIZE_SMALL);
     float ty = p.y + (lineH - ts.y) * 0.5f + Dp(1.f);
     if (const ImFontGlyph* g = ImGui::GetFontBaked()->FindGlyph('8')) ty = cy - (g->Y0 + g->Y1) * 0.5f;
-    dl->AddText({textX, ty}, Rgb(col), label.c_str());
+    if (!label.empty()) {
+        std::string shown = label;
+        if (charging) {
+            g_animating = true;
+            const int dots = int(ImGui::GetTime() * 2.5) % 4;   // 0..3, about 1.6 s per cycle
+            shown.append(CHARGING_DOTS, dots);
+        }
+        dl->AddText({textX, ty}, Rgb(col), shown.c_str());
+    }
     ImGui::PopFont();
     if (!extra.empty()) {
         ImGui::PushFont(g_fonts.regular, SIZE_SMALL);
@@ -540,7 +740,8 @@ void BatteryInline(int pct, const char* suffix, bool charging, bool iconRight) {
 // ---------------------------------------------------------------------------
 
 namespace {
-struct CardFrame { ImGuiID id; bool interactive; };
+struct CardFrame { ImGuiID id; bool interactive; float hover; };
+constexpr float CARD_HOVER_SCALE = 0.015f;   // +1.5 % when hovered
 std::vector<CardFrame> g_cards;
 }
 
@@ -557,7 +758,7 @@ void BeginCard(const char* id, float padding, bool interactive) {
     ImGui::BeginChild(id, {0, 0},
                       ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    g_cards.push_back({gid, interactive});
+    g_cards.push_back({gid, interactive, hv});
 }
 
 bool EndCard() {
@@ -565,6 +766,31 @@ bool EndCard() {
     g_cards.pop_back();
     // Inside the card: was an inner widget under the mouse?
     const bool innerHovered = ImGui::IsAnyItemHovered();
+    // Hover: the whole card grows a little around its centre, eased by the
+    // same value as its colours. Everything the card drew this frame is in its
+    // own draw list, so scaling those vertices (and their clip rectangles)
+    // scales the card as one piece.
+    if (f.interactive) {
+        const float hv = f.hover;
+        if (hv > 0.002f) {
+            if (hv < 0.998f) g_animating = true;
+            const float e = hv * hv * (3.f - 2.f * hv);   // ease in-out
+            const float k = 1.f + CARD_HOVER_SCALE * e;
+            const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+            const ImVec2 c = {wp.x + ws.x * 0.5f, wp.y + ws.y * 0.5f};
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            for (ImDrawVert& v : dl->VtxBuffer) {
+                v.pos.x = c.x + (v.pos.x - c.x) * k;
+                v.pos.y = c.y + (v.pos.y - c.y) * k;
+            }
+            for (ImDrawCmd& cmd : dl->CmdBuffer) {
+                cmd.ClipRect.x = std::floor(c.x + (cmd.ClipRect.x - c.x) * k);
+                cmd.ClipRect.y = std::floor(c.y + (cmd.ClipRect.y - c.y) * k);
+                cmd.ClipRect.z = std::ceil(c.x + (cmd.ClipRect.z - c.x) * k);
+                cmd.ClipRect.w = std::ceil(c.y + (cmd.ClipRect.w - c.y) * k);
+            }
+        }
+    }
     ImGui::EndChild();
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
