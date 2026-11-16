@@ -3,7 +3,11 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <shobjidl_core.h>
+
+#include <cstdio>
+#include <string>
 
 #include <winrt/base.h>
 
@@ -13,6 +17,8 @@
 
 #include "app/DeviceManager.h"
 #include "app/Version.h"
+#include "core/I18n.h"
+#include "platform/Autostart.h"
 #include "ui/AppUI.h"
 #include "ui/Sounds.h"
 
@@ -33,6 +39,82 @@ bool  g_focused   = true;
 bool  g_minimized = false;
 float g_dpiScale  = 1.f;
 bool  g_dpiChanged = false;
+
+// ---- Notification area (system tray) ----
+// The icon is always there while the app runs. Closing the window hides it
+// (unless "keep running when closed" is off); the menu has Open and Quit.
+constexpr UINT WM_TRAY  = WM_APP + 1;
+constexpr UINT WM_SHOW_APP = WM_APP + 2;   // sent by a second launch: bring the window back
+constexpr UINT ID_OPEN  = 1001;
+constexpr UINT ID_QUIT  = 1002;
+UINT  g_taskbarCreated = 0;           // Explorer restarted: add the icon again
+NOTIFYICONDATAW g_tray{};
+bool  g_trayHintShown = false;        // "still running" balloon, once per session
+sw2::DeviceManager* g_devices = nullptr;
+
+std::wstring Wide(const char* utf8) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L' ');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w.data(), n);
+    return w;
+}
+
+void AddTrayIcon(HWND hwnd) {
+    g_tray = {};
+    g_tray.cbSize = sizeof(g_tray);
+    g_tray.hWnd = hwnd;
+    g_tray.uID = 1;
+    g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+    g_tray.uCallbackMessage = WM_TRAY;
+    g_tray.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+    wcscpy_s(g_tray.szTip, L"SW2 Adapter");
+    Shell_NotifyIconW(NIM_ADD, &g_tray);
+    g_tray.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &g_tray);
+}
+
+void SetTrayTip(const std::wstring& tip) {
+    if (tip == g_tray.szTip) return;
+    wcsncpy_s(g_tray.szTip, tip.c_str(), _TRUNCATE);
+    g_tray.uFlags = NIF_TIP | NIF_SHOWTIP;
+    Shell_NotifyIconW(NIM_MODIFY, &g_tray);
+}
+
+void ShowMainWindow(HWND hwnd) {
+    ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd);
+}
+
+void ShowTrayMenu(HWND hwnd) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, ID_OPEN, Wide(sw2::tr("Open SW2 Adapter", "Abrir o SW2 Adapter")).c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_QUIT, Wide(sw2::tr("Quit", "Sair")).c_str());
+    SetMenuDefaultItem(menu, ID_OPEN, FALSE);
+    POINT pt{};
+    GetCursorPos(&pt);
+    SetForegroundWindow(hwnd);   // required for the menu to close when clicking elsewhere
+    const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    if (cmd == ID_OPEN) ShowMainWindow(hwnd);
+    else if (cmd == ID_QUIT) DestroyWindow(hwnd);
+}
+
+void HideToTray(HWND hwnd) {
+    ShowWindow(hwnd, SW_HIDE);
+    if (g_trayHintShown) return;
+    g_trayHintShown = true;
+    NOTIFYICONDATAW n = g_tray;
+    n.uFlags = NIF_INFO;
+    n.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+    wcscpy_s(n.szInfoTitle, L"SW2 Adapter");
+    wcsncpy_s(n.szInfo, Wide(sw2::tr("Still running here, ready to connect your controllers. Right-click the icon to quit.",
+                                     "Continua rodando aqui, pronto para conectar seus controles. Clique com o botão direito no ícone para sair.")).c_str(),
+              _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+}
 
 void CreateRTV() {
     ID3D11Texture2D* back = nullptr;
@@ -71,7 +153,22 @@ void CleanupDevice() {
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
+    if (g_taskbarCreated && msg == g_taskbarCreated) { AddTrayIcon(hWnd); return 0; }
     switch (msg) {
+        case WM_TRAY:
+            switch (LOWORD(lParam)) {   // NOTIFYICON_VERSION_4: the event is in the low word
+                case NIN_SELECT:
+                case NIN_KEYSELECT:
+                case WM_LBUTTONDBLCLK: ShowMainWindow(hWnd); break;
+                case WM_CONTEXTMENU:   ShowTrayMenu(hWnd); break;
+            }
+            return 0;
+        case WM_SHOW_APP:
+            ShowMainWindow(hWnd);
+            return 0;
+        case WM_CLOSE:
+            if (g_devices && g_devices->Settings().closeToTray) { HideToTray(hWnd); return 0; }
+            break;   // DefWindowProc destroys the window: the app quits
         case WM_ACTIVATEAPP:
             g_focused = wParam != FALSE;
             return 0;
@@ -100,6 +197,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;   // no ALT menu beep
             break;
         case WM_DESTROY:
+            Shell_NotifyIconW(NIM_DELETE, &g_tray);
             PostQuitMessage(0);
             return 0;
     }
@@ -119,9 +217,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // One instance only: two apps would fight over the same controllers.
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\SW2JoyConsAdapter.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // Ask the running copy to show itself (also brings it back from the tray).
         if (HWND other = FindWindowW(WINDOW_CLASS, nullptr)) {
-            ShowWindow(other, SW_RESTORE);
-            SetForegroundWindow(other);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(other, &pid);
+            AllowSetForegroundWindow(pid);
+            PostMessageW(other, WM_SHOW_APP, 0, 0);
         }
         return 0;
     }
@@ -155,8 +256,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         DestroyWindow(hwnd);
         return 1;
     }
-    ShowWindow(hwnd, SW_SHOWDEFAULT);
-    UpdateWindow(hwnd);
+    // Started with Windows (--tray): stay in the notification area.
+    const bool startInTray = wcsstr(GetCommandLineW(), sw2::AUTOSTART_FLAG) != nullptr;
+    if (!startInTray) {
+        ShowWindow(hwnd, SW_SHOWDEFAULT);
+        UpdateWindow(hwnd);
+    }
+    g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    AddTrayIcon(hwnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -170,6 +277,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     devices.Init();
     if (wcsstr(GetCommandLineW(), L"--demo")) devices.SetDemo(true);
     if (wcsstr(GetCommandLineW(), L"--trace")) devices.SetTrace(true);
+    g_devices = &devices;
     sw2::AppUI ui(devices, sounds);
     ui.SetupFonts(g_dpiScale);
     ui.SetupStyle(g_dpiScale);
@@ -202,7 +310,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             ui.SetupFonts(g_dpiScale);
             ui.SetupStyle(g_dpiScale);
         }
-        if (g_minimized) {
+        // Tray tooltip: how many controllers are connected (checked once a second).
+        static double lastTip = -10.0;
+        if (const double now = GetTickCount64() / 1000.0; now - lastTip >= 1.0) {
+            lastTip = now;
+            int connected = 0;
+            for (const auto& v : devices.Snapshot()) connected += v.state == sw2::DeviceState::Connected;
+            char tip[96];
+            if (connected == 0) std::snprintf(tip, sizeof(tip), "SW2 Adapter · %s", sw2::tr("no controller connected", "nenhum controle conectado"));
+            else std::snprintf(tip, sizeof(tip), connected == 1 ? sw2::tr("SW2 Adapter · 1 controller connected", "SW2 Adapter · 1 controle conectado")
+                                                                : sw2::tr("SW2 Adapter · %d controllers connected", "SW2 Adapter · %d controles conectados"),
+                               connected);
+            SetTrayTip(Wide(tip));
+        }
+        if (g_minimized || !IsWindowVisible(hwnd)) {
             // Keep the connection logic alive (background reconnects, sounds) without drawing.
             ui.Background();
             MsgWaitForMultipleObjects(0, nullptr, FALSE, MINIMIZED_MS, QS_ALLINPUT);
@@ -220,8 +341,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         const bool interacting = g_focused && ImGui::GetTime() - lastInputTime < INTERACTION_WINDOW_S;
-        g_swap->Present(interacting ? 1 : 0, 0);
-        const DWORD wait = !g_focused ? BACKGROUND_MS : interacting ? INTERACTIVE_MS : IDLE_MS;
+        const bool smooth = interacting || ui.WantsSmoothFrames();   // animations stay fluid, focused or not
+        g_swap->Present(smooth ? 1 : 0, 0);
+        const DWORD wait = smooth ? INTERACTIVE_MS : !g_focused ? BACKGROUND_MS : IDLE_MS;
         if (wait) MsgWaitForMultipleObjects(0, nullptr, FALSE, wait, QS_ALLINPUT);
     }
 
