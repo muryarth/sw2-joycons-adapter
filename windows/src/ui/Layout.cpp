@@ -60,13 +60,10 @@ float HalfWidth() { return (ImGui::GetContentRegionAvail().x - ImGui::GetStyle()
 
 std::string FormatDuration(int minutes, bool compact) {
     if (minutes < 0) return {};
-    if (minutes >= 60) minutes = (minutes + 5) / 10 * 10;   // false precision helps nobody
     const int h = minutes / 60, m = minutes % 60;
     char b[32];
-    if (compact)             std::snprintf(b, sizeof(b), h > 0 ? "%dh" : "%dmin", h > 0 ? h : m);
-    else if (h > 0 && m > 0) std::snprintf(b, sizeof(b), "%d h %02d min", h, m);
-    else if (h > 0)          std::snprintf(b, sizeof(b), "%d h", h);
-    else                     std::snprintf(b, sizeof(b), "%d min", m);
+    if (h > 0) std::snprintf(b, sizeof(b), compact ? "%dh%02dm" : "%d h %02d min", h, m);
+    else       std::snprintf(b, sizeof(b), compact ? "%dm" : "%d min", m);
     return b;
 }
 
